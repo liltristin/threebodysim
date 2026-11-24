@@ -243,7 +243,11 @@ export interface PhysicsStepResult {
 
 export type CameraMode = 'free' | 'com' | 'follow' | 'planet-surface';
 
+/** 渲染质量与帧率分级模式（high: 桌面高画质；performance: 移动端高帧率） */
+export type QualityMode = 'high' | 'performance';
+
 export interface VisualOptions {
+  readonly qualityMode: QualityMode;
   readonly showTrails: boolean;
   readonly trailLength: number;
   readonly showVelocityVectors: boolean;
@@ -255,6 +259,7 @@ export interface VisualOptions {
 }
 
 export const DEFAULT_VISUAL_OPTIONS: VisualOptions = {
+  qualityMode: 'high',
   showTrails: true,
   trailLength: 900,
   showVelocityVectors: false,
@@ -378,5 +383,6 @@ export interface SimulationActions {
   readonly setCameraMode: (mode: CameraMode, targetBodyId?: string | null) => void;
   readonly resetCameraView: () => void;
   readonly updateVisualOptions: (patch: Partial<VisualOptions>) => void;
+  readonly setQualityMode: (mode: QualityMode) => void;
   readonly clearTrails: () => void;
 }

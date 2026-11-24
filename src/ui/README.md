@@ -1,11 +1,13 @@
-# `src/ui/` — React 深空科幻 HUD 界面
+# `src/ui/` — 航天遥测极简风 HUD 与移动端响应式界面
 
-全中文深空科幻毛玻璃 HUD 组件层，严格遵循渲染与物理零耦合约定（仅依赖 `src/types/contracts.ts`、`src/presets/presets.ts`、`react` 与 `lucide-react`）。
+全中文航天遥测极简风（Aerospace Minimalism）UI 层，严格零物理/Three.js 耦合（仅依赖 `src/types/contracts.ts`、`src/presets/presets.ts`、`react` 与 `lucide-react`）。
+
+## 设计要点
+- **黑曜石材质与零移动端模糊**：桌面端（`>= 768px`）采用 `bg-[#070A12]/80 md:backdrop-blur-md border-white/[0.08]`；移动端（`< 768px`）严禁使用任何 `backdrop-blur`，统一纯半透明 `bg-[#070A12]/[0.92]`，确保高帧率流畅渲染。
+- **精密控件与排版**：全量实时数据使用 `font-mono tabular-nums` 配合稳定最小宽度防抖；滑块全面使用 `.aero-slider` + `--slider-pct`；新增苹果/航天风分段胶囊 `SegmentedControl`。
+- **响应式与按需重绘**：`useIsMobile`（`max-width: 767px`）在桌面端启用 `288px` 左右折叠侧栏 + 圆角胶囊 Floating Dock（含相机快捷切换），在移动端启用全屏无遮挡默认态 + 紧凑底部栏 + 最高 `55vh` 的 `MobileBottomSheet`（触控热区 `>= 40px`）；`EnergyDriftChart` / `TemperatureChart` 支持 `active` 属性在不可见时完全跳过重绘与尺寸监听。
 
 ## 导出入口 (`src/ui/index.ts`)
-- `HudOverlay`（Props: `{ snapshot: HudSnapshot; actions: SimulationActions }`）— 主 HUD 覆盖层，包含顶部状态条、快捷键（`H` 纯净模式 / `Space` 播放暂停）、左右可折叠面板与底部悬浮时间条。
-- `TimelineBar` — 底部时间控制条（播放/暂停、单步、时间倍速与慢动作双读数、自动慢动作、重置、随机生成）。
-- `ControlPanel` — 可折叠左侧栏（5 套经典预设卡片、物理引擎与数值设置、2~8 颗天体防抖草稿编辑器）。
-- `TelemetryPanel` — 可折叠右侧栏（4 种相机视角与行星自转速度、3D 视觉与 Bloom 开关、物理守恒监控、三体行星恒/乱纪元与天空观测面板）。
-- `charts/EnergyDriftChart` — 高分屏 DPR 原生 `<canvas>` 相对能量漂移对数曲线图（叠加碰撞合并虚线事件标注）。
-- `charts/TemperatureChart` — 高分屏 DPR 原生 `<canvas>` 三体行星表面温度曲线图（背景含 0°C~45°C 翠绿宜居带阴影，按纪元分段着色）。
+- `HudOverlay`（Props: `{ snapshot: HudSnapshot; actions: SimulationActions }`）
+- `TimelineBar`、`ControlPanel`、`ControlPanelContent`、`TelemetryPanel`、`TelemetryPanelContent`、`MobileBottomSheet`
+- `EnergyDriftChart`、`TemperatureChart`、`SegmentedControl`、`useIsMobile`

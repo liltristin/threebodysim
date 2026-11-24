@@ -184,6 +184,73 @@ export function createCoronaTexture(): THREE.CanvasTexture | null {
 }
 
 /**
+ * 生成性能模式专属的多段径向渐变恒星光晕纹理（绕过 UnrealBloomPass 时提供通透耀眼的视觉替代）：
+ * 白热致密核心 → 饱和恒星内晕 → 丝滑长尾外晕 + 柔和十字星芒。
+ */
+export function createPerformanceCoronaTexture(): THREE.CanvasTexture | null {
+  if (typeof document === 'undefined') return null;
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  const half = size * 0.5;
+  ctx.clearRect(0, 0, size, size);
+
+  // 外层长尾丝滑光晕（模拟 Bloom 大半径柔光扩散）
+  const outerGrad = ctx.createRadialGradient(half, half, 0, half, half, half);
+  outerGrad.addColorStop(0.0, 'rgba(255, 255, 255, 1.0)');
+  outerGrad.addColorStop(0.07, 'rgba(255, 255, 255, 0.96)');
+  outerGrad.addColorStop(0.16, 'rgba(255, 252, 245, 0.78)');
+  outerGrad.addColorStop(0.3, 'rgba(255, 246, 234, 0.44)');
+  outerGrad.addColorStop(0.5, 'rgba(255, 240, 226, 0.18)');
+  outerGrad.addColorStop(0.72, 'rgba(255, 236, 222, 0.055)');
+  outerGrad.addColorStop(0.9, 'rgba(255, 232, 220, 0.012)');
+  outerGrad.addColorStop(1.0, 'rgba(255, 232, 220, 0.0)');
+
+  ctx.fillStyle = outerGrad;
+  ctx.fillRect(0, 0, size, size);
+
+  // 紧凑白热内核心，增强无 Bloom 时的恒星立体亮度感
+  const coreGrad = ctx.createRadialGradient(
+    half,
+    half,
+    0,
+    half,
+    half,
+    half * 0.24
+  );
+  coreGrad.addColorStop(0.0, 'rgba(255, 255, 255, 0.95)');
+  coreGrad.addColorStop(0.45, 'rgba(255, 254, 250, 0.55)');
+  coreGrad.addColorStop(1.0, 'rgba(255, 250, 242, 0.0)');
+  ctx.fillStyle = coreGrad;
+  ctx.fillRect(0, 0, size, size);
+
+  // 柔和精细星芒衍射线
+  ctx.save();
+  ctx.translate(half, half);
+  for (let i = 0; i < 2; i++) {
+    ctx.rotate(i === 0 ? 0 : Math.PI / 2);
+    const rayGrad = ctx.createLinearGradient(-half, 0, half, 0);
+    rayGrad.addColorStop(0.0, 'rgba(255, 255, 255, 0.0)');
+    rayGrad.addColorStop(0.24, 'rgba(255, 255, 255, 0.05)');
+    rayGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.34)');
+    rayGrad.addColorStop(0.76, 'rgba(255, 255, 255, 0.05)');
+    rayGrad.addColorStop(1.0, 'rgba(255, 255, 255, 0.0)');
+    ctx.fillStyle = rayGrad;
+    ctx.fillRect(-half, -1.75, size, 3.5);
+  }
+  ctx.restore();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+/**
  * 生成柔和圆形星点纹理（消除 Points 默认方块像素锯齿）。
  */
 export function createStarPointTexture(): THREE.CanvasTexture | null {

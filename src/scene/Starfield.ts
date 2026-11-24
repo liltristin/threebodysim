@@ -3,11 +3,15 @@
  *
  * 设计要点：
  * - 三层大半径球壳（680 ~ 920），始终跟随相机中心消除视差，确保太空视角与近地视角均自然衔接。
+ * - 支持画质模式密度分级与运行时热切换（QualityMode）：
+ *   - 'high'：3400 远景暗星 + 420 冷暖亮星 + 480 星云尘埃（共 4300 点）。
+ *   - 'performance'：900 远景暗星 + 160 冷暖亮星 + 120 星云尘埃（共 1180 点，大幅降低移动端顶点与过绘负载）。
  * - 所有恒星点与尘埃云的线性 RGB 严格 <= 0.85，绝不触发 Bloom（threshold = 1.0）。
- * - 渲染顺序 renderOrder = -22 / -20，开启 depthTest、关闭 depthWrite，保证近地地貌与天体正确遮挡星空。
+ * - 渲染顺序 renderOrder = -22 / -21 / -20，开启 depthTest、关闭 depthWrite，保证近地地貌与天体正确遮挡星空。
  */
 
 import * as THREE from 'three';
+import type { QualityMode } from '../types/contracts';
 import {
   clampLinearColor,
   createNebulaPuffTexture,
@@ -32,53 +36,69 @@ const NEBULA_PALETTE_HEX = [
   '#3e2438', // 极淡玫瑰暗尘
 ] as const;
 
+interface StarfieldDensityPreset {
+  readonly faintCount: number;
+  readonly faintSize: number;
+  readonly brightCount: number;
+  readonly brightSize: number;
+  readonly nebulaCount: number;
+  readonly nebulaSize: number;
+  readonly nebulaOpacity: number;
+}
+
+const STARFIELD_DENSITY: Readonly<Record<QualityMode, StarfieldDensityPreset>> = {
+  high: {
+    faintCount: 3400,
+    faintSize: 3.1,
+    brightCount: 420,
+    brightSize: 5.8,
+    nebulaCount: 480,
+    nebulaSize: 165,
+    nebulaOpacity: 0.11,
+  },
+  performance: {
+    faintCount: 900,
+    faintSize: 3.4,
+    brightCount: 160,
+    brightSize: 6.0,
+    nebulaCount: 120,
+    nebulaSize: 190,
+    nebulaOpacity: 0.09,
+  },
+};
+
 export class Starfield {
   public readonly group: THREE.Group;
 
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly materials: THREE.Material[] = [];
-  private readonly textures: THREE.Texture[] = [];
+  private readonly starTexture: THREE.CanvasTexture | null;
+  private readonly nebulaTexture: THREE.CanvasTexture | null;
+  private qualityMode: QualityMode;
 
-  constructor() {
+  constructor(initialQualityMode: QualityMode = 'high') {
     this.group = new THREE.Group();
     this.group.name = 'DeepSpaceStarfield';
+    this.qualityMode = initialQualityMode;
 
-    const rand = createSeededRandom(20260403);
-    const starTex = createStarPointTexture();
-    const nebulaTex = createNebulaPuffTexture();
-    if (starTex) this.textures.push(starTex);
-    if (nebulaTex) this.textures.push(nebulaTex);
+    this.starTexture = createStarPointTexture();
+    this.nebulaTexture = createNebulaPuffTexture();
 
-    // 1. 极淡银河星云尘埃带（倾角 ~34°，太空与近地夜空均可望见斜跨天穹的微光尘带）
-    this.buildNebulaBand(rand, nebulaTex);
+    this.buildLayers(initialQualityMode);
+  }
 
-    // 2. 远景精细暗星层（3400 颗）
-    this.buildStarLayer(rand, {
-      count: 3400,
-      minRadius: 740,
-      maxRadius: 920,
-      pointSize: 3.1,
-      minBrightness: 0.22,
-      maxBrightness: 0.68,
-      galacticBias: 0.35,
-      texture: starTex,
-      renderOrder: -21,
-      opacity: 0.85,
-    });
+  public getQualityMode(): QualityMode {
+    return this.qualityMode;
+  }
 
-    // 3. 中远景冷暖亮星层（420 颗）
-    this.buildStarLayer(rand, {
-      count: 420,
-      minRadius: 680,
-      maxRadius: 800,
-      pointSize: 5.8,
-      minBrightness: 0.52,
-      maxBrightness: 0.84,
-      galacticBias: 0.2,
-      texture: starTex,
-      renderOrder: -20,
-      opacity: 0.92,
-    });
+  /**
+   * 运行时热切换星场密度：干净销毁旧 Geometry/Material 后按新档位重建，复用 Canvas 纹理避免抖动。
+   */
+  public setQualityMode(mode: QualityMode): void {
+    if (mode === this.qualityMode) return;
+    this.qualityMode = mode;
+    this.clearLayers();
+    this.buildLayers(mode);
   }
 
   /**
@@ -89,19 +109,63 @@ export class Starfield {
   }
 
   public dispose(): void {
+    this.clearLayers();
+    this.starTexture?.dispose();
+    this.nebulaTexture?.dispose();
+  }
+
+  private clearLayers(): void {
     for (const geo of this.geometries) {
       geo.dispose();
     }
     for (const mat of this.materials) {
       mat.dispose();
     }
-    for (const tex of this.textures) {
-      tex.dispose();
-    }
     this.geometries.length = 0;
     this.materials.length = 0;
-    this.textures.length = 0;
     this.group.clear();
+  }
+
+  private buildLayers(mode: QualityMode): void {
+    const density = STARFIELD_DENSITY[mode];
+    const rand = createSeededRandom(20260403);
+
+    // 1. 极淡银河星云尘埃带（倾角 ~34°，太空与近地夜空均可望见斜跨天穹的微光尘带）
+    this.buildNebulaBand(
+      rand,
+      this.nebulaTexture,
+      density.nebulaCount,
+      density.nebulaSize,
+      density.nebulaOpacity
+    );
+
+    // 2. 远景精细暗星层
+    this.buildStarLayer(rand, {
+      count: density.faintCount,
+      minRadius: 740,
+      maxRadius: 920,
+      pointSize: density.faintSize,
+      minBrightness: 0.24,
+      maxBrightness: 0.68,
+      galacticBias: 0.35,
+      texture: this.starTexture,
+      renderOrder: -21,
+      opacity: 0.85,
+    });
+
+    // 3. 中远景冷暖亮星层
+    this.buildStarLayer(rand, {
+      count: density.brightCount,
+      minRadius: 680,
+      maxRadius: 800,
+      pointSize: density.brightSize,
+      minBrightness: 0.52,
+      maxBrightness: 0.84,
+      galacticBias: 0.2,
+      texture: this.starTexture,
+      renderOrder: -20,
+      opacity: 0.92,
+    });
   }
 
   private buildStarLayer(
@@ -191,9 +255,11 @@ export class Starfield {
 
   private buildNebulaBand(
     rand: () => number,
-    texture: THREE.Texture | null
+    texture: THREE.Texture | null,
+    count: number,
+    size: number,
+    opacity: number
   ): void {
-    const count = 480;
     const positions = new Float32Array(count * 3);
     const colors = new Float32Array(count * 3);
     const color = new THREE.Color();
@@ -240,12 +306,12 @@ export class Starfield {
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
     const material = new THREE.PointsMaterial({
-      size: 165,
+      size,
       sizeAttenuation: true,
       map: texture,
       vertexColors: true,
       transparent: true,
-      opacity: 0.11,
+      opacity,
       depthTest: true,
       depthWrite: false,
       blending: THREE.NormalBlending,

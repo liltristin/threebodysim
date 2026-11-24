@@ -55,6 +55,8 @@ export default function App() {
         controllerRef.current?.getActions().resetCameraView(),
       updateVisualOptions: (patch) =>
         controllerRef.current?.getActions().updateVisualOptions(patch),
+      setQualityMode: (mode) =>
+        controllerRef.current?.getActions().setQualityMode(mode),
       clearTrails: () => controllerRef.current?.getActions().clearTrails(),
     }),
     []
@@ -94,11 +96,11 @@ export default function App() {
   }, []);
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-[#020617]">
+    <div className="relative h-[100dvh] w-screen overflow-hidden bg-[#020617]">
       {/* 全屏 3D Three.js 渲染视口 */}
       <div
         ref={viewportRef}
-        className="absolute inset-0 h-full w-full"
+        className="absolute inset-0 h-full w-full touch-none"
         aria-label="3D 三体仿真视口"
       />
 

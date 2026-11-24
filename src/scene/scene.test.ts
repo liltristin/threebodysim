@@ -17,8 +17,10 @@ import {
   TrailSystem,
   VectorHelpers,
   clampLinearColor,
+  computeEffectivePixelRatio,
   computeEquatorialBasisMatrix,
   computeForceHeatColor,
+  computeHalfResolutionBloomSize,
   computeStarEmissive,
   hexToClampedColor,
 } from './index';
@@ -268,5 +270,122 @@ describe('SceneRenderer 接口与数学/HDR 规范验证', () => {
     visuals.syncBodies([star]);
     expect(visuals.group.children.length).toBe(1);
     visuals.dispose();
+  });
+
+  it('BodyVisuals 在 performance（16×16 球体 + 增强 Additive Sprite 光晕）与 high（36×24 球体）间热切换与资源清理', () => {
+    const visuals = new BodyVisuals('performance');
+    const star = makeStar({ id: 'star-perf', renderRadius: 0.1, color: '#fbbf24' });
+    const planet = makePlanet({ id: 'planet-perf', renderRadius: 0.04 });
+
+    visuals.syncBodies([star, planet]);
+    expect(visuals.getQualityMode()).toBe('performance');
+
+    const starGroup = visuals.group.getObjectByName('Star_star-perf') as THREE.Group;
+    const starMesh = starGroup.children.find((c) => c instanceof THREE.Mesh) as THREE.Mesh;
+    const starSprite = starGroup.children.find((c) => c instanceof THREE.Sprite) as THREE.Sprite;
+    const planetGroup = visuals.group.getObjectByName('Planet_planet-perf') as THREE.Group;
+    const planetSpinPivot = planetGroup.children[0] as THREE.Group;
+    const planetMesh = planetSpinPivot.children[0] as THREE.Mesh;
+
+    // performance 模式：16×16 球体 + 增强 Additive Sprite 光晕（大半径 + 高不透明度）
+    const perfGeoParams = (starMesh.geometry as THREE.SphereGeometry).parameters;
+    expect(perfGeoParams.widthSegments).toBe(16);
+    expect(perfGeoParams.heightSegments).toBe(16);
+    expect((planetMesh.geometry as THREE.SphereGeometry).parameters.widthSegments).toBe(16);
+
+    const spriteMat = starSprite.material as THREE.SpriteMaterial;
+    expect(spriteMat.blending).toBe(THREE.AdditiveBlending);
+    expect(spriteMat.depthWrite).toBe(false);
+    expect(spriteMat.opacity).toBeGreaterThanOrEqual(0.9);
+    const perfScale = starSprite.scale.x;
+    expect(perfScale).toBeCloseTo(0.1 * 9.5, 5);
+
+    // 热切换至 high 模式：36×24 球体 + 克制日冕光晕（防止与 Bloom 叠爆）
+    visuals.setQualityMode('high');
+    expect(visuals.getQualityMode()).toBe('high');
+    const highGeoParams = (starMesh.geometry as THREE.SphereGeometry).parameters;
+    expect(highGeoParams.widthSegments).toBe(36);
+    expect(highGeoParams.heightSegments).toBe(24);
+    expect((planetMesh.geometry as THREE.SphereGeometry).parameters.widthSegments).toBe(36);
+
+    expect(spriteMat.opacity).toBeLessThan(0.7);
+    expect(starSprite.scale.x).toBeLessThan(perfScale);
+    expect(starSprite.scale.x).toBeCloseTo(0.1 * 6.5, 5);
+
+    // 切回 performance 并校验近地模式自适应光晕增强
+    visuals.setQualityMode('performance');
+    visuals.updatePositions([star, planet], new THREE.Vector3(0, 0, 0), false, null, 0);
+    expect(starSprite.scale.x).toBeCloseTo(0.1 * 9.5, 5);
+    expect(spriteMat.opacity).toBeGreaterThanOrEqual(0.9);
+
+    visuals.dispose();
+    expect(visuals.group.children.length).toBe(0);
+  });
+
+  it('Starfield 在 performance 模式下点云总数显著低于 high 模式且线性 RGB 严格 <= 0.85', () => {
+    const countTotalPoints = (sf: Starfield): number => {
+      let total = 0;
+      for (const child of sf.group.children) {
+        if (child instanceof THREE.Points) {
+          const posAttr = child.geometry.getAttribute('position') as THREE.BufferAttribute;
+          const colAttr = child.geometry.getAttribute('color') as THREE.BufferAttribute;
+          total += posAttr.count;
+          for (let i = 0; i < colAttr.count; i++) {
+            expect(colAttr.getX(i)).toBeLessThanOrEqual(0.85 + 1e-5);
+            expect(colAttr.getY(i)).toBeLessThanOrEqual(0.85 + 1e-5);
+            expect(colAttr.getZ(i)).toBeLessThanOrEqual(0.85 + 1e-5);
+          }
+        }
+      }
+      return total;
+    };
+
+    const starfield = new Starfield('high');
+    const highTotal = countTotalPoints(starfield);
+    expect(highTotal).toBe(4300);
+
+    starfield.setQualityMode('performance');
+    expect(starfield.getQualityMode()).toBe('performance');
+    const perfTotal = countTotalPoints(starfield);
+    expect(perfTotal).toBe(1180);
+    expect(perfTotal).toBeLessThan(highTotal * 0.35);
+
+    // 切回高画质应完整还原密度
+    starfield.setQualityMode('high');
+    expect(countTotalPoints(starfield)).toBe(highTotal);
+
+    starfield.dispose();
+    expect(starfield.group.children.length).toBe(0);
+  });
+
+  it('SceneRenderer 支持 qualityMode 热切换、DPR 分级上限与半分辨率 Bloom 尺寸计算', () => {
+    // 验证 DPR 分级上限（high <= 2.0，performance <= 1.25）
+    expect(computeEffectivePixelRatio('high', 3)).toBe(2);
+    expect(computeEffectivePixelRatio('high', 1.5)).toBe(1.5);
+    expect(computeEffectivePixelRatio('performance', 3)).toBe(1.25);
+    expect(computeEffectivePixelRatio('performance', 2)).toBe(1.25);
+    expect(computeEffectivePixelRatio('performance', 1)).toBe(1);
+
+    // 验证高画质半分辨率 Bloom 目标尺寸
+    expect(computeHalfResolutionBloomSize(1920, 1080, 2)).toEqual([1920, 1080]);
+    expect(computeHalfResolutionBloomSize(1280, 720, 1)).toEqual([640, 360]);
+    expect(computeHalfResolutionBloomSize(1, 1, 1)).toEqual([1, 1]);
+
+    const renderer: ISceneRenderer = new SceneRenderer();
+    const star = makeStar();
+    const planet = makePlanet();
+
+    // 在无 WebGL 上下文的无头环境下，完整验证质量档位切换与全方法安全幂等性
+    renderer.syncBodies([star, planet], true);
+    renderer.setVisualOptions({ qualityMode: 'performance', enableBloom: false, trailLength: 400 });
+    renderer.setCameraMode('planet-surface', planet.id);
+    renderer.syncSurfaceView(22, 0.75, planet.id);
+    renderer.setVisualOptions({ qualityMode: 'high', enableBloom: true, bloomStrength: 0.85 });
+    renderer.setCameraMode('com');
+    renderer.resetCameraView(6.0);
+    renderer.resize(800, 600);
+    renderer.clearTrails();
+    renderer.dispose();
+    renderer.dispose();
   });
 });

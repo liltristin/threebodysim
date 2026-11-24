@@ -26,6 +26,7 @@ import {
   type NewBodyInput,
   type PhysicsSnapshot,
   type PhysicsStepResult,
+  type QualityMode,
   type SimulationActions,
   type TemperatureHistoryPoint,
   type VisualOptions,
@@ -34,8 +35,14 @@ import {
 /** 单帧物理最大增量（秒），防止切换浏览器标签页后产生时间跳变 */
 const MAX_FRAME_DELTA_SECONDS = 0.05;
 
-/** 默认 HUD 节流间隔（毫秒）：80ms ≈ 12.5 Hz，位于 10~15 Hz 规范区间 */
-const DEFAULT_HUD_THROTTLE_MS = 80;
+/** 移动端 / 性能模式轨迹默认上限（降低顶点缓冲与着色器开销） */
+export const PERFORMANCE_MAX_TRAIL_LENGTH = 400;
+
+/** 移动端 / 性能模式 HUD 节流间隔（毫秒）：125ms = 8 Hz */
+export const MOBILE_HUD_THROTTLE_MS = 125;
+
+/** 桌面端 / 高画质模式 HUD 节流间隔（毫秒）：80ms ≈ 12.5 Hz，位于 10~15 Hz 规范区间 */
+export const DESKTOP_HUD_THROTTLE_MS = 80;
 
 /** 默认曲线历史最大点数 */
 const DEFAULT_MAX_HISTORY_POINTS = 300;
@@ -47,16 +54,36 @@ const RANDOM_SYSTEM_CAMERA_DISTANCE = 6.5;
 const SLOWMO_TAU_DOWN_SECONDS = 0.06;
 const SLOWMO_TAU_UP_SECONDS = 0.22;
 
+/**
+ * 自动探测默认渲染分级模式：
+ * - 触屏粗指针（pointer: coarse）或窄屏（< 768px）默认进入 'performance' 高帧率模式；
+ * - 其余桌面端与无头 Node 测试环境默认 'high'。
+ */
+export function detectDefaultQualityMode(): QualityMode {
+  if (typeof window === 'undefined') {
+    return 'high';
+  }
+  const isCoarsePointer =
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(pointer: coarse)').matches;
+  if (isCoarsePointer || window.innerWidth < 768) {
+    return 'performance';
+  }
+  return 'high';
+}
+
 export type HudListener = (snapshot: HudSnapshot) => void;
 
 export interface SimulationControllerOptions {
   /** 初始预设 ID（默认 DEFAULT_PRESET_ID = 'figure-8'） */
   readonly initialPresetId?: string;
+  /** 初始渲染质量分级（默认按 detectDefaultQualityMode() 自动探测） */
+  readonly initialQualityMode?: QualityMode;
   /** 可选自定义渲染器实现（默认 new SceneRenderer()；便于无头集成测试注入 mock） */
   readonly renderer?: ISceneRenderer;
   /** 可选自定义物理引擎实例 */
   readonly physics?: PhysicsEngine;
-  /** HUD 节流推送间隔（毫秒，默认 80ms） */
+  /** HUD 节流推送间隔（毫秒；未传时按质量模式自动采用 80ms / 125ms） */
   readonly hudThrottleMs?: number;
   /** 能量/温度历史曲线最大点数（默认 300） */
   readonly maxHistoryPoints?: number;
@@ -125,7 +152,8 @@ class RingHistory<T> {
 export class SimulationController {
   private readonly physics: PhysicsEngine;
   private readonly renderer: ISceneRenderer;
-  private readonly hudThrottleMs: number;
+  private readonly hasCustomHudThrottle: boolean;
+  private hudThrottleMs: number;
 
   private readonly energyHistory: RingHistory<EnergyHistoryPoint>;
   private readonly temperatureHistory: RingHistory<TemperatureHistoryPoint>;
@@ -152,10 +180,17 @@ export class SimulationController {
   constructor(options?: SimulationControllerOptions) {
     const initialPresetId = options?.initialPresetId ?? DEFAULT_PRESET_ID;
     const preset = PRESET_MAP[initialPresetId] ?? PRESET_MAP[DEFAULT_PRESET_ID];
+    const initialQualityMode: QualityMode =
+      options?.initialQualityMode ?? detectDefaultQualityMode();
 
     this.physics = options?.physics ?? new PhysicsEngine(preset.id);
     this.renderer = options?.renderer ?? new SceneRenderer();
-    this.hudThrottleMs = Math.max(16, options?.hudThrottleMs ?? DEFAULT_HUD_THROTTLE_MS);
+    this.hasCustomHudThrottle = options?.hudThrottleMs !== undefined;
+    this.hudThrottleMs = this.hasCustomHudThrottle
+      ? Math.max(16, options!.hudThrottleMs!)
+      : initialQualityMode === 'performance'
+        ? MOBILE_HUD_THROTTLE_MS
+        : DESKTOP_HUD_THROTTLE_MS;
     this.isRunning = options?.autoStart ?? true;
 
     const maxHistoryPoints = options?.maxHistoryPoints ?? DEFAULT_MAX_HISTORY_POINTS;
@@ -164,10 +199,17 @@ export class SimulationController {
 
     const activePresetId = this.physics.getPresetId();
     const activePreset = activePresetId ? PRESET_MAP[activePresetId] : undefined;
+    const recommendedTrail =
+      activePreset?.recommendedTrailLength ?? DEFAULT_VISUAL_OPTIONS.trailLength;
+    const initialTrailLength =
+      initialQualityMode === 'performance'
+        ? Math.min(recommendedTrail, PERFORMANCE_MAX_TRAIL_LENGTH)
+        : recommendedTrail;
 
     this.visualOptions = {
       ...DEFAULT_VISUAL_OPTIONS,
-      trailLength: activePreset?.recommendedTrailLength ?? DEFAULT_VISUAL_OPTIONS.trailLength,
+      qualityMode: initialQualityMode,
+      trailLength: initialTrailLength,
     };
     this.defaultCameraDistance = activePreset?.defaultCameraDistance ?? 5.5;
 
@@ -179,7 +221,7 @@ export class SimulationController {
   }
 
   /**
-   * 获取引用稳定的全部 23 项 SimulationActions（供 React UI 直接消费，不触发子组件重绑事件）
+   * 获取引用稳定的全部 24 项 SimulationActions（供 React UI 直接消费，不触发子组件重绑事件）
    */
   public getActions(): SimulationActions {
     return this.actions;
@@ -354,7 +396,7 @@ export class SimulationController {
   }
 
   // ============================================================================
-  // 23 项 SimulationActions 实现
+  // 24 项 SimulationActions 实现
   // ============================================================================
 
   private createBoundActions(): SimulationActions {
@@ -385,6 +427,7 @@ export class SimulationController {
       resetCameraView: () => this.resetCameraView(),
       updateVisualOptions: (patch: Partial<VisualOptions>) =>
         this.updateVisualOptions(patch),
+      setQualityMode: (mode: QualityMode) => this.setQualityMode(mode),
       clearTrails: () => this.clearTrails(),
     };
   }
@@ -497,10 +540,15 @@ export class SimulationController {
     const consistentSnapshot = this.buildConsistentSnapshot(rawSnapshot);
     this.latestSnapshot = consistentSnapshot;
 
-    // 同步预设推荐轨迹长度与默认相机距离
+    // 同步预设推荐轨迹长度（按当前渲染分级收敛）与默认相机距离
+    const nextTrailLength =
+      this.visualOptions.qualityMode === 'performance'
+        ? Math.min(preset.recommendedTrailLength, PERFORMANCE_MAX_TRAIL_LENGTH)
+        : preset.recommendedTrailLength;
+
     this.visualOptions = {
       ...this.visualOptions,
-      trailLength: preset.recommendedTrailLength,
+      trailLength: nextTrailLength,
     };
     this.defaultCameraDistance = preset.defaultCameraDistance;
 
@@ -510,7 +558,7 @@ export class SimulationController {
 
     if (this.mounted) {
       this.renderer.setVisualOptions({
-        trailLength: preset.recommendedTrailLength,
+        trailLength: nextTrailLength,
       });
       this.renderer.syncBodies(consistentSnapshot.bodies, true);
       this.syncRendererSurfaceIfNeeded(consistentSnapshot);
@@ -766,8 +814,50 @@ export class SimulationController {
       ...sanitized,
     };
 
+    if (sanitized.qualityMode !== undefined && !this.hasCustomHudThrottle) {
+      this.hudThrottleMs =
+        sanitized.qualityMode === 'performance'
+          ? MOBILE_HUD_THROTTLE_MS
+          : DESKTOP_HUD_THROTTLE_MS;
+    }
+
     if (this.mounted) {
       this.renderer.setVisualOptions(sanitized);
+      if (!this.isRunning) {
+        this.renderer.renderFrame(this.latestSnapshot, 0);
+      }
+    }
+    this.emitHudNow();
+  }
+
+  private setQualityMode(mode: QualityMode): void {
+    if (this.disposed) return;
+    if (this.visualOptions.qualityMode === mode) return;
+
+    let nextTrailLength = this.visualOptions.trailLength;
+    if (mode === 'performance') {
+      nextTrailLength = Math.min(nextTrailLength, PERFORMANCE_MAX_TRAIL_LENGTH);
+    } else if (nextTrailLength <= PERFORMANCE_MAX_TRAIL_LENGTH) {
+      const presetId = this.physics.getPresetId();
+      const activePreset = presetId ? PRESET_MAP[presetId] : undefined;
+      nextTrailLength =
+        activePreset?.recommendedTrailLength ?? DEFAULT_VISUAL_OPTIONS.trailLength;
+    }
+
+    const nextVisuals: VisualOptions = {
+      ...this.visualOptions,
+      qualityMode: mode,
+      trailLength: nextTrailLength,
+    };
+    this.visualOptions = nextVisuals;
+
+    if (!this.hasCustomHudThrottle) {
+      this.hudThrottleMs =
+        mode === 'performance' ? MOBILE_HUD_THROTTLE_MS : DESKTOP_HUD_THROTTLE_MS;
+    }
+
+    if (this.mounted) {
+      this.renderer.setVisualOptions(nextVisuals);
       if (!this.isRunning) {
         this.renderer.renderFrame(this.latestSnapshot, 0);
       }

@@ -12,28 +12,29 @@ const QUICK_COLORS = [
   '#fde047',
   '#fb923c',
   '#f87171',
-  '#c084fc',
-  '#f472b6',
 ] as const;
 
 export interface BodyEditorCardProps {
   readonly body: BodyState;
   readonly canDelete: boolean;
   readonly isExpanded: boolean;
+  readonly touchFriendly?: boolean;
   readonly onToggleExpand: () => void;
   readonly onUpdate: (bodyId: string, patch: BodyPatch) => void;
   readonly onRemove: (bodyId: string) => void;
 }
 
 /**
- * 单个天体可展开参数编辑卡片
- * - 采用本地受控草稿状态，在失焦 / 回车 / 点击“应用”时提交 `updateBody`
- * - 彻底避免 10~15 Hz `HudSnapshot` 刷新打断用户输入负号、小数点或科学计数法
+ * 航天极简手风琴天体编辑器卡片
+ * - 默认折叠态仅展示「色标圆点 + 名称 + 质量」及删除/展开按钮（无杂乱外发光）
+ * - 点击展开显示名称、质量、位置/速度 6 个数值框、快速选色与“应用”按钮
+ * - 本地受控草稿防抖机制：失焦 / 回车 / 点击“应用”提交 `updateBody`，不被 8~15Hz 遥测打断
  */
 export const BodyEditorCard: React.FC<BodyEditorCardProps> = ({
   body,
   canDelete,
   isExpanded,
+  touchFriendly = false,
   onToggleExpand,
   onUpdate,
   onRemove,
@@ -43,7 +44,6 @@ export const BodyEditorCard: React.FC<BodyEditorCardProps> = ({
   const [appliedFlash, setAppliedFlash] = useState(false);
   const flashTimerRef = useRef<number | null>(null);
 
-  // 切换或收起时清理草稿
   useEffect(() => {
     if (!isExpanded) {
       setDrafts({});
@@ -241,12 +241,8 @@ export const BodyEditorCard: React.FC<BodyEditorCardProps> = ({
       }
     }
 
-    if (posModified) {
-      patch.position = nextPos;
-    }
-    if (velModified) {
-      patch.velocity = nextVel;
-    }
+    if (posModified) patch.position = nextPos;
+    if (velModified) patch.velocity = nextVel;
 
     setInvalidFields(nextInvalid);
 
@@ -301,60 +297,52 @@ export const BodyEditorCard: React.FC<BodyEditorCardProps> = ({
 
   const hasPendingDrafts = Object.keys(drafts).length > 0;
   const isPlanet = body.role === 'planet';
+  const safeHexColor = /^#[0-9a-fA-F]{6}$/.test(body.color) ? body.color : '#38bdf8';
 
   const inputBaseClass = (key: FieldKey) =>
-    `w-full select-text rounded-md border px-2 py-1 font-mono text-[11px] tabular-nums text-slate-100 outline-none transition-colors ${
+    `w-full select-text rounded-md border px-2 font-mono text-[11px] tabular-nums text-white outline-none transition-colors ${
+      touchFriendly ? 'min-h-[38px] py-1.5' : 'py-1'
+    } ${
       invalidFields[key]
-        ? 'border-rose-500/80 bg-rose-950/40 focus:border-rose-400'
+        ? 'border-rose-400/70 bg-rose-500/10'
         : drafts[key] !== undefined
-          ? 'border-cyan-400/70 bg-slate-900/95 focus:border-cyan-300'
-          : 'border-slate-700/80 bg-slate-950/70 hover:border-slate-600 focus:border-cyan-400'
+          ? 'border-sky-400/60 bg-white/[0.06]'
+          : 'border-white/[0.08] bg-black/40 hover:border-white/[0.16] focus:border-sky-400/60'
     }`;
 
   return (
     <div
       className={`rounded-lg border transition-colors ${
         isExpanded
-          ? 'border-cyan-500/35 bg-slate-950/70'
-          : 'border-slate-800/80 bg-slate-950/40 hover:border-slate-700/90'
+          ? 'border-white/[0.14] bg-white/[0.04]'
+          : 'border-white/[0.06] bg-white/[0.015] hover:border-white/[0.12]'
       }`}
     >
-      {/* 折叠标题行 */}
-      <div className="flex items-center justify-between gap-1.5 px-2.5 py-2">
+      {/* 手风琴极简折叠行：仅展示「色标圆点 + 名称 + 质量」及删除/展开按钮 */}
+      <div
+        className={`flex items-center justify-between gap-1.5 px-2.5 ${
+          touchFriendly ? 'min-h-[44px] py-1' : 'py-1.5'
+        }`}
+      >
         <button
           type="button"
           onClick={onToggleExpand}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          className={`flex min-w-0 flex-1 items-center gap-2 text-left ${
+            touchFriendly ? 'min-h-[40px]' : ''
+          }`}
         >
           <span
-            className="h-2.5 w-2.5 shrink-0 rounded-full"
-            style={{
-              backgroundColor: body.color,
-              boxShadow: `0 0 8px ${body.color}`,
-            }}
+            className="h-2 w-2 shrink-0 rounded-full"
+            style={{ backgroundColor: safeHexColor }}
           />
-          <span className="truncate text-xs font-medium text-slate-100">
+          <span className="truncate text-xs font-medium text-white">
             {body.name}
           </span>
-          <span
-            className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
-              isPlanet
-                ? 'border border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
-                : 'border border-amber-500/30 bg-amber-500/10 text-amber-200'
-            }`}
-          >
-            {isPlanet ? '行星' : '恒星'}
-          </span>
-          {isPlanet && body.isTestParticle && (
-            <span className="shrink-0 rounded border border-cyan-500/30 bg-cyan-500/10 px-1 py-0.5 text-[9px] text-cyan-300">
-              测试粒子
-            </span>
-          )}
         </button>
 
-        <div className="flex shrink-0 items-center gap-1.5">
-          <span className="font-mono text-[10px] tabular-nums text-slate-400">
-            M {formatMass(body.mass)}
+        <div className="flex shrink-0 items-center gap-1">
+          <span className="min-w-[44px] text-right font-mono text-[11px] tabular-nums text-slate-400">
+            {formatMass(body.mass)}
           </span>
           <button
             type="button"
@@ -364,9 +352,11 @@ export const BodyEditorCard: React.FC<BodyEditorCardProps> = ({
               e.stopPropagation();
               onRemove(body.id);
             }}
-            className={`rounded p-1 transition-colors ${
+            className={`inline-flex items-center justify-center rounded-md transition-colors ${
+              touchFriendly ? 'min-h-[40px] min-w-[40px]' : 'h-6 w-6'
+            } ${
               canDelete
-                ? 'text-slate-400 hover:bg-rose-500/15 hover:text-rose-300'
+                ? 'text-slate-500 hover:bg-rose-500/15 hover:text-rose-300'
                 : 'cursor-not-allowed text-slate-700'
             }`}
           >
@@ -376,7 +366,9 @@ export const BodyEditorCard: React.FC<BodyEditorCardProps> = ({
             type="button"
             onClick={onToggleExpand}
             aria-label={isExpanded ? '收起参数' : '展开参数'}
-            className="rounded p-0.5 text-slate-400 hover:text-slate-200"
+            className={`inline-flex items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/[0.06] hover:text-slate-200 ${
+              touchFriendly ? 'min-h-[40px] min-w-[40px]' : 'h-6 w-6'
+            }`}
           >
             <ChevronDown
               className={`h-3.5 w-3.5 transition-transform duration-200 ${
@@ -387,11 +379,29 @@ export const BodyEditorCard: React.FC<BodyEditorCardProps> = ({
         </div>
       </div>
 
-      {/* 展开参数表单 */}
+      {/* 展开后的参数表单 */}
       {isExpanded && (
-        <div className="space-y-2.5 border-t border-slate-800/80 px-2.5 py-2.5">
+        <div className="space-y-2 border-t border-white/[0.06] px-2.5 py-2.5">
+          {/* 角色元信息微标 */}
+          <div className="flex items-center gap-1.5 text-[10px]">
+            <span
+              className={`rounded border px-1.5 py-0.5 font-medium ${
+                isPlanet
+                  ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300'
+                  : 'border-white/[0.1] bg-white/[0.05] text-slate-300'
+              }`}
+            >
+              {isPlanet ? '三体行星' : '恒星'}
+            </span>
+            {isPlanet && body.isTestParticle && (
+              <span className="rounded border border-sky-400/25 bg-sky-500/10 px-1.5 py-0.5 text-sky-300">
+                零反作用测试粒子
+              </span>
+            )}
+          </div>
+
           {/* 名称 + 质量 */}
-          <div className="grid grid-cols-5 gap-2">
+          <div className="grid grid-cols-5 gap-1.5">
             <label className="col-span-3 space-y-1">
               <span className="block text-[10px] text-slate-400">名称</span>
               <input
@@ -401,12 +411,14 @@ export const BodyEditorCard: React.FC<BodyEditorCardProps> = ({
                 onChange={(e) => handleChange('name', e.target.value)}
                 onBlur={() => handleBlur('name')}
                 onKeyDown={(e) => handleKeyDown(e, 'name')}
-                className={`w-full select-text rounded-md border px-2 py-1 text-[11px] text-slate-100 outline-none transition-colors ${
+                className={`w-full select-text rounded-md border px-2 text-[11px] text-white outline-none transition-colors ${
+                  touchFriendly ? 'min-h-[38px] py-1.5' : 'py-1'
+                } ${
                   invalidFields.name
-                    ? 'border-rose-500/80 bg-rose-950/40'
+                    ? 'border-rose-400/70 bg-rose-500/10'
                     : drafts.name !== undefined
-                      ? 'border-cyan-400/70 bg-slate-900/95'
-                      : 'border-slate-700/80 bg-slate-950/70 focus:border-cyan-400'
+                      ? 'border-sky-400/60 bg-white/[0.06]'
+                      : 'border-white/[0.08] bg-black/40 focus:border-sky-400/60'
                 }`}
               />
             </label>
@@ -428,11 +440,35 @@ export const BodyEditorCard: React.FC<BodyEditorCardProps> = ({
           {/* 位置 (X, Y, Z) */}
           <div className="space-y-1">
             <span className="block text-[10px] text-slate-400">位置 (X, Y, Z)</span>
-            <div className="grid grid-cols-3 gap-1.5">
+            <div className="grid grid-cols-3 gap-1">
               {(['px', 'py', 'pz'] as const).map((key, idx) => (
                 <div key={key} className="relative">
                   <span className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 font-mono text-[9px] text-slate-500">
                     {['X', 'Y', 'Z'][idx]}
+                  </span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={getDisplayValue(key)}
+                    onFocus={() => handleFocus(key)}
+                    onChange={(e) => handleChange(key, e.target.value)}
+                    onBlur={() => handleBlur(key)}
+                    onKeyDown={(e) => handleKeyDown(e, key)}
+                    className={`${inputBaseClass(key)} pl-4`}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* 速度 (Vx, Vy, Vz) */}
+          <div className="space-y-1">
+            <span className="block text-[10px] text-slate-400">速度 (Vx, Vy, Vz)</span>
+            <div className="grid grid-cols-3 gap-1">
+              {(['vx', 'vy', 'vz'] as const).map((key, idx) => (
+                <div key={key} className="relative">
+                  <span className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 font-mono text-[9px] text-slate-500">
+                    {['Vx', 'Vy', 'Vz'][idx]}
                   </span>
                   <input
                     type="text"
@@ -449,75 +485,60 @@ export const BodyEditorCard: React.FC<BodyEditorCardProps> = ({
             </div>
           </div>
 
-          {/* 速度 (Vx, Vy, Vz) */}
-          <div className="space-y-1">
-            <span className="block text-[10px] text-slate-400">速度 (Vx, Vy, Vz)</span>
-            <div className="grid grid-cols-3 gap-1.5">
-              {(['vx', 'vy', 'vz'] as const).map((key, idx) => (
-                <div key={key} className="relative">
-                  <span className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 font-mono text-[9px] text-slate-500">
-                    {['Vx', 'Vy', 'Vz'][idx]}
-                  </span>
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    value={getDisplayValue(key)}
-                    onFocus={() => handleFocus(key)}
-                    onChange={(e) => handleChange(key, e.target.value)}
-                    onBlur={() => handleBlur(key)}
-                    onKeyDown={(e) => handleKeyDown(e, key)}
-                    className={`${inputBaseClass(key)} pl-6`}
-                  />
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* 颜色选择 + 应用按钮 */}
+          {/* 快速选色 + 应用按钮 */}
           <div className="flex items-center justify-between gap-2 pt-0.5">
             <div className="flex items-center gap-1.5">
-              <label className="relative flex cursor-pointer items-center gap-1.5 rounded-md border border-slate-700/80 bg-slate-900/70 px-1.5 py-1 hover:border-cyan-500/40">
+              <label
+                className={`relative flex cursor-pointer items-center gap-1 rounded-md border border-white/[0.08] bg-black/40 px-1.5 hover:border-white/[0.18] ${
+                  touchFriendly ? 'min-h-[40px]' : 'py-1'
+                }`}
+              >
                 <input
                   type="color"
-                  value={/^#[0-9a-fA-F]{6}$/.test(body.color) ? body.color : '#38bdf8'}
+                  value={safeHexColor}
                   onChange={(e) => onUpdate(body.id, { color: e.target.value })}
-                  className="h-4 w-4 cursor-pointer rounded border-0 bg-transparent p-0"
+                  className="h-3.5 w-3.5 cursor-pointer rounded border-0 bg-transparent p-0"
                 />
                 <span className="font-mono text-[10px] uppercase text-slate-300">
-                  {body.color}
+                  {safeHexColor}
                 </span>
               </label>
-              <div className="flex items-center gap-1">
-                {QUICK_COLORS.slice(0, 5).map((hex) => (
+              <div className="flex items-center gap-0.5">
+                {QUICK_COLORS.slice(0, touchFriendly ? 3 : 5).map((hex) => (
                   <button
                     key={hex}
                     type="button"
                     title={`切换颜色 ${hex}`}
                     onClick={() => onUpdate(body.id, { color: hex })}
-                    className={`h-3.5 w-3.5 rounded-full border transition-transform hover:scale-110 ${
-                      body.color.toLowerCase() === hex
-                        ? 'border-white scale-110'
-                        : 'border-slate-700'
+                    className={`inline-flex items-center justify-center rounded-md ${
+                      touchFriendly ? 'min-h-[40px] min-w-[40px]' : 'h-5 w-5'
                     }`}
-                    style={{ backgroundColor: hex }}
-                  />
+                  >
+                    <span
+                      className={`h-3.5 w-3.5 rounded-full border transition-transform hover:scale-110 ${
+                        safeHexColor.toLowerCase() === hex
+                          ? 'scale-110 border-white'
+                          : 'border-white/20'
+                      }`}
+                      style={{ backgroundColor: hex }}
+                    />
+                  </button>
                 ))}
               </div>
             </div>
 
             <button
               type="button"
-              onMouseDown={(e) => {
-                // 防止按钮抢夺焦点先触发 blur
-                e.preventDefault();
-              }}
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => commitDrafts(undefined, false)}
-              className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+              className={`inline-flex shrink-0 items-center gap-1 rounded-md border px-2.5 text-[11px] font-medium transition-colors ${
+                touchFriendly ? 'min-h-[40px]' : 'py-1'
+              } ${
                 appliedFlash
-                  ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-200'
+                  ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-300'
                   : hasPendingDrafts
-                    ? 'border-cyan-400/70 bg-cyan-500/20 text-cyan-200 hover:bg-cyan-500/30'
-                    : 'border-slate-700/80 bg-slate-900/70 text-slate-300 hover:border-cyan-500/40 hover:text-cyan-200'
+                    ? 'border-sky-400/50 bg-sky-400/20 text-white hover:bg-sky-400/30'
+                    : 'border-white/[0.12] bg-white/[0.06] text-slate-200 hover:border-white/20 hover:bg-white/[0.10]'
               }`}
             >
               <Check className="h-3 w-3" />

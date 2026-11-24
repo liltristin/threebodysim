@@ -6,25 +6,29 @@ export interface EnergyDriftChartProps {
   readonly history: readonly EnergyHistoryPoint[];
   readonly collisionEvents: readonly CollisionEvent[];
   readonly height?: number;
+  /** 为 false 时（侧栏折叠、纯净模式、移动端未打开遥测抽屉）跳过 canvas 重绘与尺寸监听 */
+  readonly active?: boolean;
 }
 
 const LOG_FLOOR = 1e-15;
 
 /**
- * 轻量原生 <canvas> 相对能量漂移实时曲线图
- * - 支持高分屏 DPR 自适应
- * - 采用对数纵轴展示 |ΔE / E₀|，并叠加碰撞合并事件虚线竖线与标注
+ * 轻量原生 <canvas> 相对能量漂移实时曲线图（航天极简黑曜石风格）
+ * - 支持高分屏 DPR 自适应与按需暂停重绘（active=false 零 CPU 开销）
+ * - 对数纵轴展示 |ΔE / E₀|，冷星蓝曲线 + 碰撞合并虚线事件标注
  */
 export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
   history,
   collisionEvents,
-  height = 114,
+  height = 108,
+  active = true,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [width, setWidth] = useState<number>(280);
+  const [width, setWidth] = useState<number>(240);
 
   useEffect(() => {
+    if (!active) return;
     const el = containerRef.current;
     if (!el) return;
 
@@ -39,16 +43,17 @@ export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
     const observer = new ResizeObserver(updateWidth);
     observer.observe(el);
     return () => observer.disconnect();
-  }, []);
+  }, [active]);
 
   useEffect(() => {
+    if (!active) return;
     const canvas = canvasRef.current;
     if (!canvas || width <= 0) return;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const targetW = Math.max(1, Math.round(width * dpr));
     const targetH = Math.max(1, Math.round(height * dpr));
     if (canvas.width !== targetW || canvas.height !== targetH) {
@@ -59,31 +64,31 @@ export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
 
-    const padLeft = 46;
-    const padRight = 10;
+    const padLeft = 44;
+    const padRight = 8;
     const padTop = 18;
-    const padBottom = 18;
+    const padBottom = 16;
     const plotW = Math.max(1, width - padLeft - padRight);
     const plotH = Math.max(1, height - padTop - padBottom);
 
-    // 深空微暗绘图底板
-    ctx.fillStyle = 'rgba(2, 6, 23, 0.58)';
+    // 黑曜石深暗绘图底板
+    ctx.fillStyle = 'rgba(5, 8, 16, 0.72)';
     ctx.fillRect(padLeft, padTop, plotW, plotH);
 
-    // 图表标题角标
-    ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
-    ctx.fillStyle = 'rgba(148, 163, 184, 0.85)';
+    // 左上角标题
+    ctx.font = '9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.78)';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.fillText('log₁₀ |ΔE/E₀|', padLeft, 3);
 
     if (history.length < 2) {
-      ctx.strokeStyle = 'rgba(51, 65, 85, 0.5)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
       ctx.lineWidth = 1;
       ctx.strokeRect(padLeft + 0.5, padTop + 0.5, plotW - 1, plotH - 1);
 
-      ctx.font = '11px "Microsoft YaHei", system-ui, sans-serif';
-      ctx.fillStyle = 'rgba(148, 163, 184, 0.65)';
+      ctx.font = '10.5px "Microsoft YaHei", system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.55)';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('等待积分采样数据...', padLeft + plotW / 2, padTop + plotH / 2);
@@ -94,7 +99,6 @@ export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
     const tMax = history[history.length - 1].simTime;
     const tSpan = Math.max(tMax - tMin, 1e-6);
 
-    // 计算对数纵轴范围
     let minLog = Infinity;
     let maxLog = -Infinity;
     for (let i = 0; i < history.length; i++) {
@@ -129,9 +133,9 @@ export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
       return padTop + plotH - Math.min(1, Math.max(0, norm)) * plotH;
     };
 
-    // 绘制水平网格与科学计数法刻度
+    // 柔和冷白水平参考线与科学计数法刻度
     const tickCount = 3;
-    ctx.font = '9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
 
@@ -140,30 +144,26 @@ export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
       const exp = maxExp - ratio * expSpan;
       const y = padTop + ratio * plotH;
 
-      ctx.strokeStyle =
-        i === 0 || i === tickCount
-          ? 'rgba(56, 189, 248, 0.16)'
-          : 'rgba(148, 163, 184, 0.12)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.065)';
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(padLeft, Math.round(y) + 0.5);
       ctx.lineTo(padLeft + plotW, Math.round(y) + 0.5);
       ctx.stroke();
 
-      const expLabel = `1e${Math.round(exp)}`;
-      ctx.fillStyle = 'rgba(148, 163, 184, 0.85)';
-      ctx.fillText(expLabel, padLeft - 5, y);
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.72)';
+      ctx.fillText(`1e${Math.round(exp)}`, padLeft - 5, y);
     }
 
-    // 绘制曲线下方渐层填充
     ctx.save();
     ctx.beginPath();
     ctx.rect(padLeft, padTop, plotW, plotH);
     ctx.clip();
 
+    // 冷星蓝微渐层填充
     const grad = ctx.createLinearGradient(0, padTop, 0, padTop + plotH);
-    grad.addColorStop(0, 'rgba(34, 211, 238, 0.24)');
-    grad.addColorStop(1, 'rgba(34, 211, 238, 0.01)');
+    grad.addColorStop(0, 'rgba(56, 189, 248, 0.18)');
+    grad.addColorStop(1, 'rgba(56, 189, 248, 0.0)');
 
     ctx.beginPath();
     for (let i = 0; i < history.length; i++) {
@@ -181,7 +181,7 @@ export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
     ctx.fillStyle = grad;
     ctx.fill();
 
-    // 绘制漂移折线
+    // 冷星蓝漂移折线
     ctx.beginPath();
     for (let i = 0; i < history.length; i++) {
       const x = mapX(history[i].simTime);
@@ -189,13 +189,13 @@ export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     }
-    ctx.strokeStyle = '#22d3ee';
-    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 1.5;
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
     ctx.stroke();
 
-    // 绘制碰撞合并事件的虚线竖线与标注
+    // 碰撞合并事件虚线竖线与标注
     const visibleCollisions = collisionEvents.filter(
       (ev) => ev.simTime >= tMin && ev.simTime <= tMax
     );
@@ -208,8 +208,8 @@ export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
       const cx = mapX(ev.simTime);
 
       ctx.save();
-      ctx.strokeStyle = 'rgba(251, 191, 36, 0.85)';
-      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = 'rgba(251, 191, 36, 0.8)';
+      ctx.lineWidth = 1.1;
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
       ctx.moveTo(cx, padTop);
@@ -217,17 +217,15 @@ export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
       ctx.stroke();
       ctx.restore();
 
-      // 顶部菱形节点
       ctx.fillStyle = '#fbbf24';
       ctx.beginPath();
       ctx.moveTo(cx, padTop + 1);
-      ctx.lineTo(cx + 3.5, padTop + 4.5);
-      ctx.lineTo(cx, padTop + 8);
-      ctx.lineTo(cx - 3.5, padTop + 4.5);
+      ctx.lineTo(cx + 3, padTop + 4);
+      ctx.lineTo(cx, padTop + 7);
+      ctx.lineTo(cx - 3, padTop + 4);
       ctx.closePath();
       ctx.fill();
 
-      // 碰撞合并文字标记（防相邻碰撞重叠）
       const label = '碰撞合并';
       if (cx - lastLabelX < 46) {
         stagger = (stagger + 1) % 2;
@@ -236,9 +234,9 @@ export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
       }
       lastLabelX = cx;
 
-      const labelY = padTop + 12 + stagger * 12;
-      const alignRight = cx > padLeft + plotW - 48;
-      ctx.font = '9.5px "Microsoft YaHei", system-ui, sans-serif';
+      const labelY = padTop + 11 + stagger * 12;
+      const alignRight = cx > padLeft + plotW - 46;
+      ctx.font = '9px "Microsoft YaHei", system-ui, sans-serif';
       ctx.textAlign = alignRight ? 'right' : 'left';
       ctx.textBaseline = 'middle';
 
@@ -246,33 +244,29 @@ export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
       const textW = ctx.measureText(label).width;
       const boxX = alignRight ? textX - textW - 3 : textX - 3;
 
-      ctx.fillStyle = 'rgba(24, 18, 6, 0.82)';
+      ctx.fillStyle = 'rgba(7, 10, 18, 0.88)';
       ctx.fillRect(boxX, labelY - 6, textW + 6, 12);
       ctx.fillStyle = '#fcd34d';
       ctx.fillText(label, textX, labelY);
     }
 
-    // 最新采样高亮圆点
+    // 最新采样点
     ctx.beginPath();
-    ctx.arc(lastX, lastY, 2.8, 0, Math.PI * 2);
-    ctx.fillStyle = '#67e8f9';
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(lastX, lastY, 5.5, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(34, 211, 238, 0.25)';
+    ctx.arc(lastX, lastY, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
     ctx.fill();
 
     ctx.restore();
 
-    // 边框
-    ctx.strokeStyle = 'rgba(34, 211, 238, 0.18)';
+    // 发丝边框
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
     ctx.lineWidth = 1;
     ctx.strokeRect(padLeft + 0.5, padTop + 0.5, plotW - 1, plotH - 1);
 
     // 右上角最新漂移读数
     const latestAbs = Math.abs(lastPt.relativeDrift);
     ctx.font = '9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
-    ctx.fillStyle = '#67e8f9';
+    ctx.fillStyle = '#7dd3fc';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'top';
     ctx.fillText(
@@ -282,18 +276,18 @@ export const EnergyDriftChart: React.FC<EnergyDriftChartProps> = ({
     );
 
     // 底部时间轴两端标注
-    ctx.fillStyle = 'rgba(148, 163, 184, 0.75)';
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.65)';
     ctx.textBaseline = 'bottom';
     ctx.textAlign = 'left';
-    ctx.fillText(`T=${formatSimTime(tMin)}`, padLeft, height - 2);
+    ctx.fillText(`T=${formatSimTime(tMin)}`, padLeft, height - 1);
     ctx.textAlign = 'right';
-    ctx.fillText(`T=${formatSimTime(tMax)}`, padLeft + plotW, height - 2);
-  }, [history, collisionEvents, width, height]);
+    ctx.fillText(`T=${formatSimTime(tMax)}`, padLeft + plotW, height - 1);
+  }, [active, history, collisionEvents, width, height]);
 
   return (
     <div
       ref={containerRef}
-      className="w-full overflow-hidden rounded-lg border border-cyan-500/15 bg-slate-950/60"
+      className="w-full overflow-hidden rounded-lg border border-white/[0.07] bg-black/40"
     >
       <canvas
         ref={canvasRef}

@@ -1,10 +1,13 @@
 /**
  * 原生 Three.js 3D 渲染引擎（SceneRenderer）
  *
- * 完整实现 `src/types/contracts.ts` 中的 `ISceneRenderer` 接口：
- * - HDR 选择性辉光管线：ACESFilmicToneMapping + HalfFloatType EffectComposer +
- *   RenderPass → UnrealBloomPass(threshold = 1.0, radius = 0.55) → OutputPass
- * - 多层次深空星场、HDR 恒星核心+日冕+点光源、光照行星球体
+ * 完整实现 `src/types/contracts.ts` 中的 `ISceneRenderer` 接口，并支持移动端高帧率渲染分级（QualityMode）：
+ * - 画质分级与 DPR 管控：
+ *   - `'high'`（桌面高画质）：DPR <= 2，懒初始化 `HalfFloatType` MSAA `EffectComposer` +
+ *     半分辨率 `UnrealBloomPass(threshold = 1.0, radius = 0.55)` + `OutputPass`，36×24 球体与 4300 点星场。
+ *   - `'performance'`（移动端高帧率）：DPR <= 1.25，彻底绕过 `EffectComposer` + `UnrealBloomPass`
+ *     直接走 `ACESFilmicToneMapping` 渲染（初始即为性能模式时不分配后处理 GPU 缓冲），
+ *     切换为 16×16 球体、增强多段径向渐变 Additive Sprite 光晕与 1180 点轻量星场。
  * - 弧长与曲率自适应环形缓冲区轨迹（零每帧 GC）
  * - 速度矢量箭头、引力/加速度对数缩放矢量箭头、质心 3D 十字、XY 平面参考网格
  * - 4 种相机模式（free / com / follow / planet-surface）与三体行星相对坐标系近地沉浸穹顶
@@ -21,6 +24,7 @@ import type {
   CameraMode,
   ISceneRenderer,
   PhysicsSnapshot,
+  QualityMode,
   Vec3,
   VisualOptions,
 } from '../types/contracts';
@@ -53,6 +57,37 @@ const SURFACE_MAX_PITCH = Math.PI * 0.485; // 最高仰视至近天顶 87.3°（
 const BLOOM_THRESHOLD = 1.0;
 const BLOOM_RADIUS = 0.55;
 
+const HIGH_DPR_CAP = 2.0;
+const PERF_DPR_CAP = 1.25;
+
+/**
+ * 计算当前画质模式下的有效 DPR 上限（high <= 2，performance <= 1.25）。
+ */
+export function computeEffectivePixelRatio(
+  mode: QualityMode,
+  devicePixelRatio: number
+): number {
+  const safeDpr =
+    Number.isFinite(devicePixelRatio) && devicePixelRatio > 0
+      ? devicePixelRatio
+      : 1;
+  const cap = mode === 'performance' ? PERF_DPR_CAP : HIGH_DPR_CAP;
+  return Math.min(safeDpr, cap);
+}
+
+/**
+ * 计算高画质模式下 UnrealBloomPass 半分辨率渲染目标尺寸。
+ */
+export function computeHalfResolutionBloomSize(
+  width: number,
+  height: number,
+  pixelRatio: number
+): readonly [number, number] {
+  const bloomW = Math.max(1, Math.floor(width * pixelRatio * 0.5));
+  const bloomH = Math.max(1, Math.floor(height * pixelRatio * 0.5));
+  return [bloomW, bloomH] as const;
+}
+
 export class SceneRenderer implements ISceneRenderer {
   private container: HTMLElement | null = null;
   private renderer: THREE.WebGLRenderer | null = null;
@@ -73,6 +108,8 @@ export class SceneRenderer implements ISceneRenderer {
   private surfaceDome: SurfaceDome | null = null;
 
   private visualOptions: VisualOptions = { ...DEFAULT_VISUAL_OPTIONS };
+  private viewportWidth: number = 1;
+  private viewportHeight: number = 1;
   private defaultCameraDistance: number = 5.5;
   private cameraMode: CameraMode = 'free';
   private cameraTargetBodyId: string | null = null;
@@ -139,7 +176,10 @@ export class SceneRenderer implements ISceneRenderer {
     }
     this.disposed = false;
     this.container = container;
-    this.visualOptions = { ...initialVisuals };
+    this.visualOptions = {
+      ...DEFAULT_VISUAL_OPTIONS,
+      ...initialVisuals,
+    };
     this.defaultCameraDistance = Math.max(0.5, defaultCameraDistance || 5.5);
 
     const width = Math.max(1, container.clientWidth || window.innerWidth || 1);
@@ -147,9 +187,13 @@ export class SceneRenderer implements ISceneRenderer {
       1,
       container.clientHeight || window.innerHeight || 1
     );
-    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    this.viewportWidth = width;
+    this.viewportHeight = height;
 
-    // 1. WebGLRenderer：ACESFilmicToneMapping + SRGBColorSpace + 高性能抗锯齿
+    const qualityMode = this.visualOptions.qualityMode;
+    const pixelRatio = this.getEffectivePixelRatio(qualityMode);
+
+    // 1. WebGLRenderer：ACESFilmicToneMapping + SRGBColorSpace + 分级 DPR
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
       powerPreference: 'high-performance',
@@ -187,45 +231,10 @@ export class SceneRenderer implements ISceneRenderer {
     camera.up.set(0, 1, 0);
     this.camera = camera;
 
-    // 3. HDR HalfFloatType EffectComposer + Selective Bloom（threshold = 1.0）
-    const msaaSamples = renderer.capabilities.isWebGL2
-      ? Math.min(4, renderer.capabilities.maxSamples)
-      : 0;
-    const renderTarget = new THREE.WebGLRenderTarget(width, height, {
-      type: THREE.HalfFloatType,
-      samples: msaaSamples,
-    });
-    renderTarget.texture.name = 'HDRSceneRenderTarget';
-    this.renderTarget = renderTarget;
-
-    const composer = new EffectComposer(renderer, renderTarget);
-    composer.setPixelRatio(pixelRatio);
-    composer.setSize(width, height);
-
-    const renderPass = new RenderPass(scene, camera);
-    const bloomPass = new UnrealBloomPass(
-      new THREE.Vector2(width, height),
-      this.visualOptions.bloomStrength,
-      BLOOM_RADIUS,
-      BLOOM_THRESHOLD
-    );
-    bloomPass.threshold = BLOOM_THRESHOLD;
-    bloomPass.radius = BLOOM_RADIUS;
-    bloomPass.strength = Math.max(0, this.visualOptions.bloomStrength);
-    bloomPass.enabled = this.visualOptions.enableBloom;
-
-    const outputPass = new OutputPass();
-
-    composer.addPass(renderPass);
-    composer.addPass(bloomPass);
-    composer.addPass(outputPass);
-    // 添加完所有 Pass 后再同步一次分辨率，确保各内部 mipmap 尺寸精确匹配 DPR
-    composer.setSize(width, height);
-
-    this.composer = composer;
-    this.renderPass = renderPass;
-    this.bloomPass = bloomPass;
-    this.outputPass = outputPass;
+    // 3. 懒初始化后处理管线：仅在 'high' 模式下分配 HalfFloatType MSAA EffectComposer 与半分辨率 Bloom
+    if (qualityMode === 'high') {
+      this.ensurePostProcessing();
+    }
 
     // 4. OrbitControls（太空视角）
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -260,9 +269,9 @@ export class SceneRenderer implements ISceneRenderer {
       passive: false,
     });
 
-    // 6. 构建五大渲染子系统
-    this.starfield = new Starfield();
-    this.bodyVisuals = new BodyVisuals();
+    // 6. 构建五大渲染子系统（传入初始画质分级）
+    this.starfield = new Starfield(qualityMode);
+    this.bodyVisuals = new BodyVisuals(qualityMode);
     this.trailSystem = new TrailSystem(this.visualOptions.trailLength);
     this.vectorHelpers = new VectorHelpers(this.visualOptions);
     this.surfaceDome = new SurfaceDome();
@@ -283,10 +292,15 @@ export class SceneRenderer implements ISceneRenderer {
   }
 
   public resize(width: number, height: number): void {
-    if (!this.renderer || !this.camera || !this.composer) return;
+    if (!this.renderer || !this.camera) return;
     const w = Math.max(1, Math.floor(width));
     const h = Math.max(1, Math.floor(height));
-    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    this.viewportWidth = w;
+    this.viewportHeight = h;
+
+    const pixelRatio = this.getEffectivePixelRatio(
+      this.visualOptions.qualityMode
+    );
 
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
@@ -294,8 +308,9 @@ export class SceneRenderer implements ISceneRenderer {
     this.renderer.setPixelRatio(pixelRatio);
     this.renderer.setSize(w, h, false);
 
-    this.composer.setPixelRatio(pixelRatio);
-    this.composer.setSize(w, h);
+    if (this.visualOptions.qualityMode === 'high' && this.composer) {
+      this.syncPostProcessingSize();
+    }
 
     if (!this.isInsideRenderFrame) {
       this.renderStaticNow();
@@ -303,7 +318,7 @@ export class SceneRenderer implements ISceneRenderer {
   }
 
   public renderFrame(snapshot: PhysicsSnapshot, deltaSeconds: number): void {
-    if (this.disposed || !this.composer || !this.camera) return;
+    if (this.disposed || !this.renderer || !this.scene || !this.camera) return;
 
     this.isInsideRenderFrame = true;
     try {
@@ -333,7 +348,7 @@ export class SceneRenderer implements ISceneRenderer {
 
       const safeDt = Math.min(Math.max(deltaSeconds || 0, 0), 0.1);
       this.updateSceneObjectsAndCamera(safeDt);
-      this.composer.render(safeDt);
+      this.drawFrame(safeDt);
     } finally {
       this.isInsideRenderFrame = false;
     }
@@ -442,10 +457,28 @@ export class SceneRenderer implements ISceneRenderer {
   }
 
   public setVisualOptions(options: Partial<VisualOptions>): void {
+    const prevQualityMode = this.visualOptions.qualityMode;
     this.visualOptions = {
       ...this.visualOptions,
       ...options,
     };
+
+    const nextQualityMode = this.visualOptions.qualityMode;
+    if (nextQualityMode !== prevQualityMode) {
+      this.bodyVisuals?.setQualityMode(nextQualityMode);
+      this.starfield?.setQualityMode(nextQualityMode);
+
+      if (this.renderer) {
+        const pixelRatio = this.getEffectivePixelRatio(nextQualityMode);
+        this.renderer.setPixelRatio(pixelRatio);
+        this.renderer.setSize(this.viewportWidth, this.viewportHeight, false);
+
+        if (nextQualityMode === 'high') {
+          this.ensurePostProcessing();
+          this.syncPostProcessingSize();
+        }
+      }
+    }
 
     if (this.bloomPass) {
       this.bloomPass.enabled = this.visualOptions.enableBloom;
@@ -560,15 +593,112 @@ export class SceneRenderer implements ISceneRenderer {
   }
 
   // ============================================================================
+  // 分级 DPR、后处理懒初始化与渲染通道调度
+  // ============================================================================
+
+  private getEffectivePixelRatio(mode: QualityMode): number {
+    const rawDpr =
+      typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    return computeEffectivePixelRatio(mode, rawDpr);
+  }
+
+  /**
+   * 仅在处于或首次切入 'high' 模式时按需分配 HDR HalfFloatType EffectComposer 与半分辨率 UnrealBloomPass。
+   */
+  private ensurePostProcessing(): void {
+    if (this.composer || !this.renderer || !this.scene || !this.camera) return;
+
+    const w = Math.max(1, this.viewportWidth);
+    const h = Math.max(1, this.viewportHeight);
+    const pixelRatio = this.getEffectivePixelRatio('high');
+    const [bloomW, bloomH] = computeHalfResolutionBloomSize(w, h, pixelRatio);
+
+    const msaaSamples = this.renderer.capabilities.isWebGL2
+      ? Math.min(4, this.renderer.capabilities.maxSamples)
+      : 0;
+    const renderTarget = new THREE.WebGLRenderTarget(w, h, {
+      type: THREE.HalfFloatType,
+      samples: msaaSamples,
+    });
+    renderTarget.texture.name = 'HDRSceneRenderTarget';
+    this.renderTarget = renderTarget;
+
+    const composer = new EffectComposer(this.renderer, renderTarget);
+    const renderPass = new RenderPass(this.scene, this.camera);
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(bloomW, bloomH),
+      Math.max(0, this.visualOptions.bloomStrength),
+      BLOOM_RADIUS,
+      BLOOM_THRESHOLD
+    );
+    bloomPass.threshold = BLOOM_THRESHOLD;
+    bloomPass.radius = BLOOM_RADIUS;
+    bloomPass.strength = Math.max(0, this.visualOptions.bloomStrength);
+    bloomPass.enabled = this.visualOptions.enableBloom;
+
+    const outputPass = new OutputPass();
+
+    composer.addPass(renderPass);
+    composer.addPass(bloomPass);
+    composer.addPass(outputPass);
+
+    this.composer = composer;
+    this.renderPass = renderPass;
+    this.bloomPass = bloomPass;
+    this.outputPass = outputPass;
+
+    this.syncPostProcessingSize();
+  }
+
+  /**
+   * 同步高画质后处理管线尺寸，并在 composer.setSize 后显式将 UnrealBloomPass 锁定在半分辨率。
+   */
+  private syncPostProcessingSize(): void {
+    if (!this.composer || !this.bloomPass) return;
+
+    const w = Math.max(1, this.viewportWidth);
+    const h = Math.max(1, this.viewportHeight);
+    const pixelRatio = this.getEffectivePixelRatio(
+      this.visualOptions.qualityMode
+    );
+
+    this.composer.setPixelRatio(pixelRatio);
+    this.composer.setSize(w, h);
+
+    // 必须在 composer.setSize 之后显式降为半分辨率，避免被 EffectComposer 覆写回全分辨率
+    const [bloomW, bloomH] = computeHalfResolutionBloomSize(w, h, pixelRatio);
+    this.bloomPass.setSize(bloomW, bloomH);
+  }
+
+  private drawFrame(deltaSeconds: number): void {
+    if (!this.renderer || !this.scene || !this.camera) return;
+
+    if (this.visualOptions.qualityMode === 'performance') {
+      // 性能模式彻底绕过 EffectComposer + UnrealBloomPass，直接经 ACESFilmicToneMapping 上屏
+      this.renderer.setRenderTarget(null);
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
+
+    this.ensurePostProcessing();
+    if (this.composer) {
+      this.composer.render(deltaSeconds);
+    } else {
+      this.renderer.setRenderTarget(null);
+      this.renderer.render(this.scene, this.camera);
+    }
+  }
+
+  // ============================================================================
   // 内部场景更新与相机切换逻辑
   // ============================================================================
 
   private renderStaticNow(): void {
-    if (this.disposed || !this.composer || !this.camera) return;
+    if (this.disposed || !this.renderer || !this.scene || !this.camera) return;
     this.isInsideRenderFrame = true;
     try {
       this.updateSceneObjectsAndCamera(0);
-      this.composer.render(0);
+      this.drawFrame(0);
     } finally {
       this.isInsideRenderFrame = false;
     }

@@ -1,8 +1,11 @@
 /**
- * 天体 3D 视觉管理（恒星 HDR 核心 + 日冕光环 + 点光源；三体行星光照昼夜面 + 大气边缘光）
+ * 天体 3D 视觉管理（恒星 HDR 核心 + 分级日冕光环 + 点光源；三体行星光照昼夜面 + 大气边缘光）
  *
  * 严格遵循：
  * - 恒星通过 MeshStandardMaterial(color=0x000000, emissive, emissiveIntensity > 1.0) 触发选择性 Bloom。
+ * - 支持画质模式热切换（QualityMode）：
+ *   - 'high'：36×24 球体细分 + 克制日冕 Sprite（配合选择性 UnrealBloomPass，防止叠爆）。
+ *   - 'performance'：16×16 轻量球体细分 + 增强多段径向渐变 Additive Sprite 光晕（绕过 Bloom 仍通透耀眼）。
  * - 行星材质严格保持 emissiveIntensity <= 0.40 且漫反射反照率受限，光照下绝不触发 Bloom。
  * - syncBodies 支持天体增删、碰撞合并、改色/改半径时干净重建并释放旧 GPU 资源（零泄漏）。
  * - 近地视角下自动隐藏行星自身 Mesh，并将所有恒星按相对坐标 r_star - r_planet 渲染，
@@ -10,10 +13,12 @@
  */
 
 import * as THREE from 'three';
-import type { BodyRole, BodyState } from '../types/contracts';
+import type { BodyRole, BodyState, QualityMode } from '../types/contracts';
 import {
+  clampLinearColor,
   computeStarEmissive,
   createCoronaTexture,
+  createPerformanceCoronaTexture,
   createPlanetSurfaceTexture,
   hexToClampedColor,
 } from './colorUtils';
@@ -22,6 +27,13 @@ const MAX_SURFACE_STAR_DIST = 440;
 const MIN_TERRAIN_CLEARANCE = 0.065;
 const FLYING_STAR_MIN_ANG_RAD = 0.0045; // 约 0.26°，保证极远“飞星”仍有清晰星点
 const CLOSE_STAR_MAX_ANG_RAD = 0.42; // 约 24°，防止极限近距吞没地平线地貌
+
+const HIGH_SPACE_CORONA_SCALE = 6.5;
+const HIGH_SPACE_CORONA_OPACITY = 0.62;
+const PERF_SPACE_CORONA_SCALE = 9.5;
+const PERF_SPACE_CORONA_OPACITY = 0.92;
+
+const WHITE_TINT = new THREE.Color(1, 1, 1);
 
 interface StarVisualEntry {
   readonly role: 'star';
@@ -82,9 +94,13 @@ export class BodyVisuals {
   public readonly group: THREE.Group;
 
   private readonly entries = new Map<string, BodyVisualEntry>();
-  private readonly sharedUnitSphere: THREE.SphereGeometry;
-  private readonly coronaTexture: THREE.CanvasTexture | null;
+  private readonly highUnitSphere: THREE.SphereGeometry;
+  private readonly perfUnitSphere: THREE.SphereGeometry;
+  private readonly highCoronaTexture: THREE.CanvasTexture | null;
+  private readonly perfCoronaTexture: THREE.CanvasTexture | null;
   private readonly planetTexture: THREE.CanvasTexture | null;
+
+  private qualityMode: QualityMode;
 
   // 复用的临时向量与颜色，避免每帧 GC
   private readonly tmpRel = new THREE.Vector3();
@@ -92,13 +108,53 @@ export class BodyVisuals {
   private readonly tmpColor = new THREE.Color();
   private readonly tmpPlanetPos = new THREE.Vector3();
 
-  constructor() {
+  constructor(initialQualityMode: QualityMode = 'high') {
     this.group = new THREE.Group();
     this.group.name = 'CelestialBodyVisuals';
+    this.qualityMode = initialQualityMode;
 
-    this.sharedUnitSphere = new THREE.SphereGeometry(1, 36, 24);
-    this.coronaTexture = createCoronaTexture();
+    // 预置两套共享单位球体：桌面高画质 36×24，移动端性能模式 16×16
+    this.highUnitSphere = new THREE.SphereGeometry(1, 36, 24);
+    this.perfUnitSphere = new THREE.SphereGeometry(1, 16, 16);
+
+    this.highCoronaTexture = createCoronaTexture();
+    this.perfCoronaTexture = createPerformanceCoronaTexture();
     this.planetTexture = createPlanetSurfaceTexture();
+  }
+
+  public getQualityMode(): QualityMode {
+    return this.qualityMode;
+  }
+
+  /**
+   * 运行时热切换球体细分几何体与恒星日冕光晕表现（零重建、零 GPU 泄漏）。
+   */
+  public setQualityMode(mode: QualityMode): void {
+    if (mode === this.qualityMode) return;
+    this.qualityMode = mode;
+
+    const activeSphere = this.getActiveUnitSphere();
+    const activeCoronaTex = this.getActiveCoronaTexture();
+    const isPerf = mode === 'performance';
+
+    for (const entry of this.entries.values()) {
+      entry.mesh.geometry = activeSphere;
+      if (entry.role === 'star') {
+        entry.coronaMaterial.map = activeCoronaTex;
+        this.applyCoronaColor(entry.colorHex, entry.coronaMaterial.color);
+        entry.coronaMaterial.opacity = isPerf
+          ? PERF_SPACE_CORONA_OPACITY
+          : HIGH_SPACE_CORONA_OPACITY;
+        entry.coronaMaterial.needsUpdate = true;
+
+        const r = Math.max(entry.renderRadius, 0.005);
+        entry.corona.scale.setScalar(
+          r * (isPerf ? PERF_SPACE_CORONA_SCALE : HIGH_SPACE_CORONA_SCALE)
+        );
+      } else {
+        entry.atmosphereMesh.geometry = activeSphere;
+      }
+    }
   }
 
   /**
@@ -201,10 +257,34 @@ export class BodyVisuals {
       this.removeEntry(id, entry);
     }
     this.entries.clear();
-    this.sharedUnitSphere.dispose();
-    this.coronaTexture?.dispose();
+    this.highUnitSphere.dispose();
+    this.perfUnitSphere.dispose();
+    this.highCoronaTexture?.dispose();
+    this.perfCoronaTexture?.dispose();
     this.planetTexture?.dispose();
     this.group.clear();
+  }
+
+  private getActiveUnitSphere(): THREE.SphereGeometry {
+    return this.qualityMode === 'performance'
+      ? this.perfUnitSphere
+      : this.highUnitSphere;
+  }
+
+  private getActiveCoronaTexture(): THREE.CanvasTexture | null {
+    return this.qualityMode === 'performance'
+      ? this.perfCoronaTexture
+      : this.highCoronaTexture;
+  }
+
+  private applyCoronaColor(hex: string, target: THREE.Color): THREE.Color {
+    if (this.qualityMode === 'performance') {
+      // 性能模式绕过 Bloom：保留鲜活恒星色泽并微混白热芯，呈现通透光辉
+      target.set(hex).lerp(WHITE_TINT, 0.14);
+      return clampLinearColor(target, 1.0);
+    }
+    // 高画质模式维持克制线性上限，防止与选择性 Bloom 叠爆
+    return hexToClampedColor(hex, 0.65, target);
   }
 
   private createStarEntry(body: BodyState): StarVisualEntry {
@@ -226,24 +306,28 @@ export class BodyVisuals {
       metalness: 0.0,
     });
 
-    const mesh = new THREE.Mesh(this.sharedUnitSphere, material);
+    const mesh = new THREE.Mesh(this.getActiveUnitSphere(), material);
     mesh.scale.setScalar(body.renderRadius);
     mesh.renderOrder = 0;
     root.add(mesh);
 
-    const coronaColor = hexToClampedColor(body.color, 0.65);
+    const isPerf = this.qualityMode === 'performance';
+    const coronaColor = this.applyCoronaColor(body.color, new THREE.Color());
     const coronaMaterial = new THREE.SpriteMaterial({
-      map: this.coronaTexture,
+      map: this.getActiveCoronaTexture(),
       color: coronaColor,
       blending: THREE.AdditiveBlending,
       transparent: true,
-      opacity: 0.62,
+      opacity: isPerf ? PERF_SPACE_CORONA_OPACITY : HIGH_SPACE_CORONA_OPACITY,
       depthWrite: false,
       depthTest: true,
     });
 
     const corona = new THREE.Sprite(coronaMaterial);
-    corona.scale.setScalar(body.renderRadius * 6.5);
+    corona.scale.setScalar(
+      body.renderRadius *
+        (isPerf ? PERF_SPACE_CORONA_SCALE : HIGH_SPACE_CORONA_SCALE)
+    );
     corona.renderOrder = 10;
     root.add(corona);
 
@@ -294,7 +378,8 @@ export class BodyVisuals {
       metalness: 0.06,
     });
 
-    const mesh = new THREE.Mesh(this.sharedUnitSphere, material);
+    const unitSphere = this.getActiveUnitSphere();
+    const mesh = new THREE.Mesh(unitSphere, material);
     mesh.rotation.x = Math.PI * 0.5;
     mesh.scale.setScalar(body.renderRadius);
     mesh.renderOrder = 1;
@@ -313,10 +398,7 @@ export class BodyVisuals {
       blending: THREE.NormalBlending,
     });
 
-    const atmosphereMesh = new THREE.Mesh(
-      this.sharedUnitSphere,
-      atmosphereMaterial
-    );
+    const atmosphereMesh = new THREE.Mesh(unitSphere, atmosphereMaterial);
     atmosphereMesh.scale.setScalar(body.renderRadius * 1.15);
     atmosphereMesh.renderOrder = 3;
     root.add(atmosphereMesh);
@@ -354,7 +436,7 @@ export class BodyVisuals {
         entry.material.emissive.copy(this.tmpColor);
         entry.material.emissiveIntensity = effective;
 
-        hexToClampedColor(body.color, 0.65, entry.coronaMaterial.color);
+        this.applyCoronaColor(body.color, entry.coronaMaterial.color);
         hexToClampedColor(body.color, 0.92, entry.light.color);
 
         entry.colorHex = body.color;
@@ -396,12 +478,18 @@ export class BodyVisuals {
     isSurfaceMode: boolean,
     hasSpacePlanet: boolean
   ): void {
+    const isPerf = this.qualityMode === 'performance';
+
     if (!isSurfaceMode) {
       entry.root.position.copy(this.tmpRel);
       const r = Math.max(body.renderRadius, 0.005);
       entry.mesh.scale.setScalar(r);
-      entry.corona.scale.setScalar(r * 6.5);
-      entry.coronaMaterial.opacity = 0.62;
+      entry.corona.scale.setScalar(
+        r * (isPerf ? PERF_SPACE_CORONA_SCALE : HIGH_SPACE_CORONA_SCALE)
+      );
+      entry.coronaMaterial.opacity = isPerf
+        ? PERF_SPACE_CORONA_OPACITY
+        : HIGH_SPACE_CORONA_OPACITY;
       entry.light.visible = true;
 
       // 防止恒星贴近行星时点光源衰减发散导致行星局部超阈值 Bloom
@@ -455,10 +543,16 @@ export class BodyVisuals {
     entry.root.position.copy(this.tmpDir).multiplyScalar(renderDist);
     entry.mesh.scale.setScalar(visRadius);
 
-    // 远距“飞星”略微增强星芒比例，便于在夜空中识别；近距大日保持克制柔和日冕
-    const coronaScaleMult = isFlyingStar ? 9.5 : 5.2;
-    entry.corona.scale.setScalar(visRadius * coronaScaleMult);
-    entry.coronaMaterial.opacity = isFlyingStar ? 0.78 : 0.56;
+    // 远距“飞星”增强星芒比例，近距大日平滑自适应；性能模式额外增强通透光晕替代 Bloom
+    if (isPerf) {
+      const coronaScaleMult = isFlyingStar ? 12.2 : 7.4;
+      entry.corona.scale.setScalar(visRadius * coronaScaleMult);
+      entry.coronaMaterial.opacity = isFlyingStar ? 0.95 : 0.86;
+    } else {
+      const coronaScaleMult = isFlyingStar ? 9.5 : 5.2;
+      entry.corona.scale.setScalar(visRadius * coronaScaleMult);
+      entry.coronaMaterial.opacity = isFlyingStar ? 0.78 : 0.56;
+    }
   }
 
   private updatePlanetTransform(

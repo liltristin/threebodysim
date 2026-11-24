@@ -5,7 +5,13 @@ import type {
   ISceneRenderer,
   PhysicsSnapshot,
 } from '../../types/contracts';
-import { SimulationController } from '../SimulationController';
+import {
+  DESKTOP_HUD_THROTTLE_MS,
+  MOBILE_HUD_THROTTLE_MS,
+  PERFORMANCE_MAX_TRAIL_LENGTH,
+  SimulationController,
+  detectDefaultQualityMode,
+} from '../SimulationController';
 
 interface MockRenderer extends ISceneRenderer {
   readonly init: ReturnType<typeof vi.fn<ISceneRenderer['init']>>;
@@ -521,5 +527,151 @@ describe('SimulationController 集成测试', () => {
 
     c2.dispose();
     expect(renderer2.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('移动端触屏 (pointer: coarse) 或窄屏 (<768) 自动进入 performance 模式、轨迹收敛至 400 并采用 8Hz 节流', () => {
+    expect(PERFORMANCE_MAX_TRAIL_LENGTH).toBe(400);
+    expect(MOBILE_HUD_THROTTLE_MS).toBe(125);
+    expect(DESKTOP_HUD_THROTTLE_MS).toBe(80);
+    // 无头 Node 环境下无 window，默认返回 high
+    expect(detectDefaultQualityMode()).toBe('high');
+
+    // 场景 1：模拟触屏粗指针（即使宽屏也应进入 performance）
+    vi.stubGlobal('window', {
+      innerWidth: 1024,
+      matchMedia: vi.fn((query: string) => ({
+        matches: query === '(pointer: coarse)',
+      })),
+    });
+    expect(detectDefaultQualityMode()).toBe('performance');
+
+    const mockRaf = installMockRaf();
+    const renderer = createMockRenderer();
+    const controller = new SimulationController({ renderer });
+    const hudUpdates: HudSnapshot[] = [];
+    controller.subscribe((snap) => hudUpdates.push(snap));
+    controller.mount(createFakeContainer());
+
+    const initSnap = controller.getHudSnapshot();
+    expect(initSnap.visualOptions.qualityMode).toBe('performance');
+    expect(initSnap.visualOptions.trailLength).toBe(400);
+    expect(renderer.init.mock.calls[0][2].qualityMode).toBe('performance');
+    expect(renderer.init.mock.calls[0][2].trailLength).toBe(400);
+
+    // 切换至推荐轨迹 1200 的预设，performance 模式仍应收敛至 400
+    renderer.setVisualOptions.mockClear();
+    controller.getActions().loadPreset('chaotic-trisolaris');
+    expect(controller.getHudSnapshot().visualOptions.trailLength).toBe(400);
+    expect(renderer.setVisualOptions).toHaveBeenCalledWith({ trailLength: 400 });
+
+    // 60 FPS 驱动 1 秒：渲染 60 次，HUD 仅按 8 Hz（125ms）节流推送约 7~9 次
+    renderer.renderFrame.mockClear();
+    hudUpdates.length = 0;
+    const frameStepMs = 1000 / 60;
+    for (let i = 0; i < 60; i++) {
+      expect(mockRaf.flushNextFrame(i * frameStepMs)).toBe(true);
+    }
+    expect(renderer.renderFrame).toHaveBeenCalledTimes(60);
+    expect(hudUpdates.length).toBeGreaterThanOrEqual(7);
+    expect(hudUpdates.length).toBeLessThanOrEqual(9);
+    controller.dispose();
+
+    // 场景 2：精细指针 + 窄屏 (< 768px) 同样默认进入 performance
+    vi.stubGlobal('window', {
+      innerWidth: 390,
+      matchMedia: vi.fn(() => ({ matches: false })),
+    });
+    expect(detectDefaultQualityMode()).toBe('performance');
+    const rendererNarrow = createMockRenderer();
+    const narrowCtrl = new SimulationController({ renderer: rendererNarrow });
+    expect(narrowCtrl.getHudSnapshot().visualOptions.qualityMode).toBe('performance');
+    expect(narrowCtrl.getHudSnapshot().visualOptions.trailLength).toBe(400);
+    narrowCtrl.dispose();
+  });
+
+  it('actions.setQualityMode 支持 performance / high 热切换、幂等防抖、轨迹上下限同步与即时 HUD 推送', () => {
+    const mockRaf = installMockRaf();
+    const renderer = createMockRenderer();
+    const controller = new SimulationController({
+      initialPresetId: 'chaotic-trisolaris',
+      initialQualityMode: 'high',
+      renderer,
+      autoStart: false,
+    });
+    const hudUpdates: HudSnapshot[] = [];
+    controller.subscribe((snap) => hudUpdates.push(snap));
+    controller.mount(createFakeContainer());
+
+    const actions = controller.getActions();
+    const trisolaris = PRESET_MAP['chaotic-trisolaris'];
+    expect(controller.getHudSnapshot().visualOptions.qualityMode).toBe('high');
+    expect(controller.getHudSnapshot().visualOptions.trailLength).toBe(
+      trisolaris.recommendedTrailLength
+    );
+
+    // 1. 幂等判断：重复切换同模式不触发多余渲染或 HUD 推送
+    renderer.setVisualOptions.mockClear();
+    renderer.renderFrame.mockClear();
+    hudUpdates.length = 0;
+    actions.setQualityMode('high');
+    expect(renderer.setVisualOptions).not.toHaveBeenCalled();
+    expect(renderer.renderFrame).not.toHaveBeenCalled();
+    expect(hudUpdates).toHaveLength(0);
+
+    // 2. 热切至 performance：轨迹收敛至 400，暂停态立刻渲染并推送 HUD
+    actions.setQualityMode('performance');
+    expect(controller.getHudSnapshot().visualOptions.qualityMode).toBe('performance');
+    expect(controller.getHudSnapshot().visualOptions.trailLength).toBe(400);
+    expect(renderer.setVisualOptions).toHaveBeenCalledTimes(1);
+    expect(renderer.setVisualOptions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        qualityMode: 'performance',
+        trailLength: 400,
+      })
+    );
+    expect(renderer.renderFrame).toHaveBeenCalledTimes(1);
+    expect(hudUpdates).toHaveLength(1);
+
+    // 运行 1 秒验证节流已动态切换至 8 Hz（7~9 次）
+    actions.play();
+    hudUpdates.length = 0;
+    const frameStepMs = 1000 / 60;
+    for (let i = 0; i < 60; i++) {
+      mockRaf.flushNextFrame(i * frameStepMs);
+    }
+    expect(hudUpdates.length).toBeGreaterThanOrEqual(7);
+    expect(hudUpdates.length).toBeLessThanOrEqual(9);
+
+    // 3. 热切回 high：恢复当前预设 recommendedTrailLength (1200)，并立即推送 HUD
+    actions.pause();
+    renderer.setVisualOptions.mockClear();
+    renderer.renderFrame.mockClear();
+    hudUpdates.length = 0;
+
+    actions.setQualityMode('high');
+    expect(controller.getHudSnapshot().visualOptions.qualityMode).toBe('high');
+    expect(controller.getHudSnapshot().visualOptions.trailLength).toBe(
+      trisolaris.recommendedTrailLength
+    );
+    expect(renderer.setVisualOptions).toHaveBeenCalledTimes(1);
+    expect(renderer.setVisualOptions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        qualityMode: 'high',
+        trailLength: trisolaris.recommendedTrailLength,
+      })
+    );
+    expect(renderer.renderFrame).toHaveBeenCalledTimes(1);
+    expect(hudUpdates).toHaveLength(1);
+
+    // 运行 1 秒验证节流已恢复为 12.5 Hz（10~15 次）
+    actions.play();
+    hudUpdates.length = 0;
+    for (let i = 60; i < 120; i++) {
+      mockRaf.flushNextFrame(i * frameStepMs);
+    }
+    expect(hudUpdates.length).toBeGreaterThanOrEqual(10);
+    expect(hudUpdates.length).toBeLessThanOrEqual(15);
+
+    controller.dispose();
   });
 });

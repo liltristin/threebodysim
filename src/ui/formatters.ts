@@ -77,12 +77,12 @@ export function formatElevationDeg(rad: number): string {
   return `${sign}${deg.toFixed(1)}°`;
 }
 
-/** 相对能量漂移健康色级 */
+/** 相对能量漂移健康色级（航天极简克制色阶） */
 export function getDriftToneClass(relativeDrift: number): string {
   const abs = Math.abs(relativeDrift);
   if (!Number.isFinite(abs)) return 'text-slate-400';
   if (abs < 1e-6) return 'text-emerald-400';
-  if (abs < 1e-4) return 'text-cyan-300';
+  if (abs < 1e-4) return 'text-sky-300';
   if (abs < 1e-2) return 'text-amber-300';
   return 'text-rose-400';
 }
@@ -94,12 +94,13 @@ export function getTempToneClass(tempC: number): string {
   if (tempC > 45 && tempC <= 120) return 'text-amber-300';
   if (tempC > 120) return 'text-rose-400';
   if (tempC < 0 && tempC >= -60) return 'text-sky-300';
-  return 'text-blue-300';
+  return 'text-sky-400';
 }
 
 export interface EraTheme {
   readonly badgeTitle: string;
   readonly containerClass: string;
+  readonly pillClass: string;
   readonly titleClass: string;
   readonly dotClass: string;
   readonly subLabel: string;
@@ -114,7 +115,7 @@ const SUB_STATE_LABELS: Record<EraSubState, string> = {
   'unstable-flux': '辐射剧烈波动',
 };
 
-/** 按纪元与子状态返回深空 HUD 主题配色 */
+/** 按纪元与子状态返回克制航天遥测配色（无刺眼霓虹外发光） */
 export function getEraTheme(eraStatus: EraStatus): EraTheme {
   const { era, subState, label } = eraStatus;
   const subLabel = label || SUB_STATE_LABELS[subState];
@@ -122,10 +123,10 @@ export function getEraTheme(eraStatus: EraStatus): EraTheme {
   if (era === 'stable') {
     return {
       badgeTitle: '恒纪元',
-      containerClass:
-        'bg-gradient-to-r from-emerald-500/20 via-teal-500/15 to-cyan-500/10 border-emerald-400/45 shadow-[0_0_20px_rgba(16,185,129,0.16)]',
+      containerClass: 'border-emerald-400/25 bg-emerald-500/[0.08]',
+      pillClass: 'border-emerald-400/30 bg-emerald-500/[0.12] text-emerald-300',
       titleClass: 'text-emerald-300',
-      dotClass: 'bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.9)]',
+      dotClass: 'bg-emerald-400',
       subLabel,
     };
   }
@@ -133,10 +134,10 @@ export function getEraTheme(eraStatus: EraStatus): EraTheme {
   if (subState === 'scorching') {
     return {
       badgeTitle: '乱纪元',
-      containerClass:
-        'bg-gradient-to-r from-rose-600/25 via-orange-600/15 to-amber-500/10 border-rose-400/50 shadow-[0_0_20px_rgba(244,63,94,0.18)]',
+      containerClass: 'border-rose-400/30 bg-rose-500/[0.09]',
+      pillClass: 'border-rose-400/30 bg-rose-500/[0.12] text-rose-300',
       titleClass: 'text-rose-300',
-      dotClass: 'bg-rose-400 shadow-[0_0_10px_rgba(251,113,133,0.95)]',
+      dotClass: 'bg-rose-400',
       subLabel,
     };
   }
@@ -144,20 +145,20 @@ export function getEraTheme(eraStatus: EraStatus): EraTheme {
   if (subState === 'freezing') {
     return {
       badgeTitle: '乱纪元',
-      containerClass:
-        'bg-gradient-to-r from-sky-500/20 via-blue-600/15 to-indigo-500/15 border-sky-400/45 shadow-[0_0_20px_rgba(56,189,248,0.16)]',
+      containerClass: 'border-sky-400/30 bg-sky-500/[0.09]',
+      pillClass: 'border-sky-400/30 bg-sky-500/[0.12] text-sky-300',
       titleClass: 'text-sky-300',
-      dotClass: 'bg-sky-400 shadow-[0_0_10px_rgba(56,189,248,0.9)]',
+      dotClass: 'bg-sky-400',
       subLabel,
     };
   }
 
   return {
     badgeTitle: '乱纪元',
-    containerClass:
-      'bg-gradient-to-r from-amber-500/20 via-orange-500/15 to-yellow-500/10 border-amber-400/45 shadow-[0_0_20px_rgba(245,158,11,0.16)]',
+    containerClass: 'border-amber-400/30 bg-amber-500/[0.09]',
+    pillClass: 'border-amber-400/30 bg-amber-500/[0.12] text-amber-300',
     titleClass: 'text-amber-300',
-    dotClass: 'bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.9)]',
+    dotClass: 'bg-amber-400',
     subLabel,
   };
 }
@@ -165,6 +166,7 @@ export function getEraTheme(eraStatus: EraStatus): EraTheme {
 export interface EventTheme {
   readonly label: string;
   readonly badgeClass: string;
+  readonly compactClass: string;
   readonly description: string;
 }
 
@@ -179,29 +181,29 @@ export function getAstroEventTheme(
     case 'tri-solar-day':
       return {
         label: customLabel || '三日凌空',
-        badgeClass:
-          'bg-rose-500/20 border-rose-400/60 text-rose-200 shadow-[0_0_16px_rgba(244,63,94,0.28)] animate-pulse',
+        badgeClass: 'border-rose-400/35 bg-rose-500/[0.12] text-rose-200',
+        compactClass: 'border-rose-400/35 bg-rose-500/[0.16] text-rose-200',
         description: '三颗恒星同时升起于地平线之上，表面遭受极强炙烤',
       };
     case 'flying-stars':
       return {
         label: customLabel || '飞星',
-        badgeClass:
-          'bg-indigo-500/20 border-indigo-400/55 text-indigo-200 shadow-[0_0_14px_rgba(129,140,248,0.24)]',
+        badgeClass: 'border-sky-400/30 bg-sky-500/[0.10] text-sky-200',
+        compactClass: 'border-sky-400/30 bg-sky-500/[0.14] text-sky-200',
         description: '恒星远离退化为微弱光点，漫长严寒降临',
       };
     case 'single-sun-stable':
       return {
         label: customLabel || '单日恒纪元',
-        badgeClass:
-          'bg-emerald-500/20 border-emerald-400/50 text-emerald-200 shadow-[0_0_14px_rgba(16,185,129,0.2)]',
+        badgeClass: 'border-emerald-400/30 bg-emerald-500/[0.10] text-emerald-200',
+        compactClass: 'border-emerald-400/30 bg-emerald-500/[0.14] text-emerald-200',
         description: '单颗主星温和照耀，文明迎来喘息窗口',
       };
     case 'bi-solar-glare':
       return {
         label: customLabel || '双日炙烤',
-        badgeClass:
-          'bg-amber-500/20 border-amber-400/55 text-amber-200 shadow-[0_0_14px_rgba(245,158,11,0.24)]',
+        badgeClass: 'border-amber-400/35 bg-amber-500/[0.12] text-amber-200',
+        compactClass: 'border-amber-400/35 bg-amber-500/[0.16] text-amber-200',
         description: '双恒星同时悬于天空，地表辐射通量剧增',
       };
     default:
@@ -211,8 +213,8 @@ export function getAstroEventTheme(
 
 /** 温度曲线按纪元和温区着色 */
 export function getTemperatureStrokeColor(era: EraType, tempC: number): string {
-  if (era === 'stable') return '#2dd4bf'; // 翠青
-  if (tempC < 0) return '#38bdf8'; // 极寒冰蓝
-  if (tempC > 45) return '#fb7185'; // 酷热橙红
+  if (era === 'stable') return '#34d399'; // 翠绿
+  if (tempC < 0) return '#38bdf8'; // 极寒星蓝
+  if (tempC > 45) return '#fb7185'; // 酷热绯红
   return '#fbbf24'; // 急剧变化琥珀
 }
